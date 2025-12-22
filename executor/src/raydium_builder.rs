@@ -1,198 +1,205 @@
 /// Raydium V4 AMM Swap Instruction Builder
 /// 
-/// This module constructs the raw Solana instructions needed to execute swaps
-/// on Raydium V4 pools. The account ordering is CRITICAL - any deviation will
-/// cause transaction failures.
+/// This file manually constructs the raw byte instruction for a Raydium swap.
+/// We avoid heavy raydium-sdk dependencies by building the instruction manually
+/// (this is faster and lighter).
 
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    system_program,
-    sysvar,
 };
-use spl_token;
+use std::mem::size_of;
 
-/// Raydium V4 AMM Program ID
-pub const RAYDIUM_V4_PROGRAM: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+/// The Discriminator for SwapBaseIn on Raydium V4 is 9
+const SWAP_BASE_IN_DISCRIMINATOR: u8 = 9;
 
-/// Pool keys required for Raydium V4 swap
-/// These can be fetched from Raydium's liquidity pool data or on-chain accounts
-#[derive(Debug, Clone)]
-pub struct RaydiumPoolKeys {
-    /// AMM ID (the pool's main account)
-    pub amm_id: Pubkey,
-    /// AMM authority (PDA derived from AMM ID)
-    pub amm_authority: Pubkey,
-    /// AMM open orders account
-    pub amm_open_orders: Pubkey,
-    /// AMM target orders account  
-    pub amm_target_orders: Pubkey,
-    /// Pool coin (token A) vault
-    pub pool_coin_token_account: Pubkey,
-    /// Pool PC (token B) vault
-    pub pool_pc_token_account: Pubkey,
-    /// Serum market program ID
-    pub serum_program_id: Pubkey,
-    /// Serum market account
-    pub serum_market: Pubkey,
-    /// Serum bids account
-    pub serum_bids: Pubkey,
-    /// Serum asks account
-    pub serum_asks: Pubkey,
-    /// Serum event queue
-    pub serum_event_queue: Pubkey,
-    /// Serum coin vault (base currency)
-    pub serum_coin_vault_account: Pubkey,
-    /// Serum PC vault (quote currency)
-    pub serum_pc_vault_account: Pubkey,
-    /// Serum vault signer (PDA)
-    pub serum_vault_signer: Pubkey,
+/// Raydium V4 Program ID: 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
+const RAYDIUM_V4_PROGRAM_ID: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+
+/// Packed struct for SwapBaseIn instruction data
+/// Using packed representation ensures exact byte layout for SVM
+#[repr(C, packed)]
+struct SwapBaseInData {
+    instruction: u8,
+    amount_in: u64,
+    min_amount_out: u64,
 }
 
-/// Instruction discriminator for SwapBaseIn
-const SWAP_BASE_IN_INSTRUCTION: u8 = 9;
+/// All account keys required for a Raydium V4 swap
+/// Order is CRITICAL - must match Raydium program expectations exactly
+pub struct RaydiumSwapKeys {
+    pub amm_id: Pubkey,
+    pub amm_authority: Pubkey,
+    pub amm_open_orders: Pubkey,
+    pub amm_target_orders: Pubkey,
+    pub amm_coin_vault: Pubkey,
+    pub amm_pc_vault: Pubkey,
+    pub serum_program_id: Pubkey,
+    pub serum_market: Pubkey,
+    pub serum_bids: Pubkey,
+    pub serum_asks: Pubkey,
+    pub serum_event_queue: Pubkey,
+    pub serum_coin_vault: Pubkey,
+    pub serum_pc_vault: Pubkey,
+    pub serum_vault_signer: Pubkey,
+    pub user_source_token_account: Pubkey,
+    pub user_dest_token_account: Pubkey,
+    pub user_owner: Pubkey,
+    pub token_program: Pubkey,
+}
 
 /// Build a Raydium V4 "Swap Base In" instruction
 ///
+/// This constructs the raw bytes for a Raydium swap using high-performance
+/// packed struct serialization.
+///
 /// # Arguments
-/// * `pool_keys` - Pool configuration (accounts)
-/// * `user_source_token` - User's source token account (will be debited)
-/// * `user_destination_token` - User's destination token account (will be credited)
-/// * `user_owner` - Authority signing the transaction
+/// * `keys` - All required account public keys
 /// * `amount_in` - Amount of input token to swap
-/// * `min_amount_out` - Minimum amount of output token to receive (slippage protection)
+/// * `min_amount_out` - Minimum output (slippage protection)
 ///
 /// # Returns
-/// A complete Solana `Instruction` ready to be added to a transaction
-pub fn build_raydium_swap_base_in(
-    pool_keys: &RaydiumPoolKeys,
-    user_source_token: Pubkey,
-    user_destination_token: Pubkey,
-    user_owner: Pubkey,
+/// Complete Solana instruction ready for transaction
+///
+/// # Safety
+/// Uses unsafe slice conversion for zero-copy serialization of POD type.
+/// This is safe because SwapBaseInData is a packed, repr(C) struct with
+/// only primitive types.
+pub fn swap_base_in(
+    keys: &RaydiumSwapKeys,
     amount_in: u64,
     min_amount_out: u64,
 ) -> Instruction {
-    // Encode instruction data
-    let mut data = Vec::with_capacity(17);
-    data.push(SWAP_BASE_IN_INSTRUCTION);    // Discriminator
-    data.extend_from_slice(&amount_in.to_le_bytes());
-    data.extend_from_slice(&min_amount_out.to_le_bytes());
+    let data = SwapBaseInData {
+        instruction: SWAP_BASE_IN_DISCRIMINATOR,
+        amount_in,
+        min_amount_out,
+    };
 
-    // ⚠️ CRITICAL: Account order MUST match Raydium's program expectations
-    // Any deviation will cause "InvalidAccountData" or "InvalidArgument" errors
+    // Unsafe cast to byte slice (standard in high-perf Rust for POD types)
+    // This avoids serialization overhead and copies bytes directly
+    let data_slice = unsafe {
+        std::slice::from_raw_parts(
+            &data as *const _ as *const u8,
+            size_of::<SwapBaseInData>(),
+        )
+    };
+
+    // Account order MUST match Raydium program expectations
+    // Any deviation will cause "InvalidAccountData" or transaction failure
     let accounts = vec![
-        // 0. Token program
-        AccountMeta::new_readonly(spl_token::ID, false),
-        
-        // 1. AMM ID (pool account)
-        AccountMeta::new(pool_keys.amm_id, false),
-        
-        // 2. AMM authority (PDA, not a signer)
-        AccountMeta::new_readonly(pool_keys.amm_authority, false),
-        
-        // 3. AMM open orders
-        AccountMeta::new(pool_keys.amm_open_orders, false),
-        
-        // 4. AMM target orders (optional for some pools, but included for compatibility)
-        AccountMeta::new(pool_keys.amm_target_orders, false),
-        
-        // 5. Pool coin token account (vault for token A)
-        AccountMeta::new(pool_keys.pool_coin_token_account, false),
-        
-        // 6. Pool PC token account (vault for token B)
-        AccountMeta::new(pool_keys.pool_pc_token_account, false),
-        
-        // 7. Serum program ID
-        AccountMeta::new_readonly(pool_keys.serum_program_id, false),
-        
-        // 8. Serum market
-        AccountMeta::new(pool_keys.serum_market, false),
-        
-        // 9. Serum bids
-        AccountMeta::new(pool_keys.serum_bids, false),
-        
-        // 10. Serum asks
-        AccountMeta::new(pool_keys.serum_asks, false),
-        
-        // 11. Serum event queue
-        AccountMeta::new(pool_keys.serum_event_queue, false),
-        
-        // 12. Serum coin vault (base currency vault)
-        AccountMeta::new(pool_keys.serum_coin_vault_account, false),
-        
-        // 13. Serum PC vault (quote currency vault)
-        AccountMeta::new(pool_keys.serum_pc_vault_account, false),
-        
-        // 14. Serum vault signer (PDA derived from serum market)
-        AccountMeta::new_readonly(pool_keys.serum_vault_signer, false),
-        
-        // 15. User source token account (will be debited)
-        AccountMeta::new(user_source_token, false),
-        
-        // 16. User destination token account (will be credited)
-        AccountMeta::new(user_destination_token, false),
-        
-        // 17. User transfer authority (signer)
-        AccountMeta::new_readonly(user_owner, true),
+        // 1. Token Program
+        AccountMeta::new_readonly(keys.token_program, false),
+        // 2. AMM Account (main pool state)
+        AccountMeta::new(keys.amm_id, false),
+        // 3. AMM Authority (PDA, not a signer)
+        AccountMeta::new_readonly(keys.amm_authority, false),
+        // 4. AMM Open Orders
+        AccountMeta::new(keys.amm_open_orders, false),
+        // 5. AMM Target Orders
+        AccountMeta::new(keys.amm_target_orders, false),
+        // 6. AMM Coin Vault (token A pool vault)
+        AccountMeta::new(keys.amm_coin_vault, false),
+        // 7. AMM PC Vault (token B pool vault)
+        AccountMeta::new(keys.amm_pc_vault, false),
+        // 8. Serum Program
+        AccountMeta::new_readonly(keys.serum_program_id, false),
+        // 9. Serum Market
+        AccountMeta::new(keys.serum_market, false),
+        // 10. Serum Bids
+        AccountMeta::new(keys.serum_bids, false),
+        // 11. Serum Asks
+        AccountMeta::new(keys.serum_asks, false),
+        // 12. Serum Event Queue
+        AccountMeta::new(keys.serum_event_queue, false),
+        // 13. Serum Coin Vault
+        AccountMeta::new(keys.serum_coin_vault, false),
+        // 14. Serum PC Vault
+        AccountMeta::new(keys.serum_pc_vault, false),
+        // 15. Serum Vault Signer (PDA)
+        AccountMeta::new_readonly(keys.serum_vault_signer, false),
+        // 16. User Source Token Account (will be debited)
+        AccountMeta::new(keys.user_source_token_account, false),
+        // 17. User Destination Token Account (will be credited)
+        AccountMeta::new(keys.user_dest_token_account, false),
+        // 18. User Owner (transaction signer)
+        AccountMeta::new_readonly(keys.user_owner, true),
     ];
 
     Instruction {
-        program_id: RAYDIUM_V4_PROGRAM.parse().unwrap(),
+        program_id: RAYDIUM_V4_PROGRAM_ID.parse().unwrap(),
         accounts,
-        data,
+        data: data_slice.to_vec(),
     }
-}
-
-/// Helper function to derive AMM authority PDA
-/// This is commonly needed and derived from: seeds = [AMM_ID, nonce]
-pub fn get_amm_pda_authority(amm_id: &Pubkey, nonce: u8) -> Pubkey {
-    Pubkey::create_program_address(
-        &[&amm_id.to_bytes()[..32], &[nonce]],
-        &RAYDIUM_V4_PROGRAM.parse().unwrap(),
-    )
-    .expect("Failed to derive AMM authority PDA")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spl_token;
 
     #[test]
-    fn test_instruction_data_layout() {
-        let pool_keys = RaydiumPoolKeys {
+    fn test_instruction_layout() {
+        // Verify packed struct size
+        assert_eq!(size_of::<SwapBaseInData>(), 17, "SwapBaseInData should be 17 bytes: 1 + 8 + 8");
+
+        let keys = RaydiumSwapKeys {
             amm_id: Pubkey::new_unique(),
             amm_authority: Pubkey::new_unique(),
             amm_open_orders: Pubkey::new_unique(),
             amm_target_orders: Pubkey::new_unique(),
-            pool_coin_token_account: Pubkey::new_unique(),
-            pool_pc_token_account: Pubkey::new_unique(),
+            amm_coin_vault: Pubkey::new_unique(),
+            amm_pc_vault: Pubkey::new_unique(),
             serum_program_id: Pubkey::new_unique(),
             serum_market: Pubkey::new_unique(),
             serum_bids: Pubkey::new_unique(),
             serum_asks: Pubkey::new_unique(),
             serum_event_queue: Pubkey::new_unique(),
-            serum_coin_vault_account: Pubkey::new_unique(),
-            serum_pc_vault_account: Pubkey::new_unique(),
+            serum_coin_vault: Pubkey::new_unique(),
+            serum_pc_vault: Pubkey::new_unique(),
             serum_vault_signer: Pubkey::new_unique(),
+            user_source_token_account: Pubkey::new_unique(),
+            user_dest_token_account: Pubkey::new_unique(),
+            user_owner: Pubkey::new_unique(),
+            token_program: spl_token::ID,
         };
 
-        let ix = build_raydium_swap_base_in(
-            &pool_keys,
-            Pubkey::new_unique(),
-            Pubkey::new_unique(),
-            Pubkey::new_unique(),
-            1_000_000,
-            900_000,
-        );
+        let ix = swap_base_in(&keys, 1_000_000, 950_000);
 
-        // Verify instruction data layout
-        assert_eq!(ix.data[0], SWAP_BASE_IN_INSTRUCTION);
-        assert_eq!(ix.data.len(), 17); // 1 + 8 + 8 bytes
-        
+        // Verify instruction data
+        assert_eq!(ix.data.len(), 17, "Instruction data should be 17 bytes");
+        assert_eq!(ix.data[0], SWAP_BASE_IN_DISCRIMINATOR, "First byte should be discriminator");
+
         // Verify account count
-        assert_eq!(ix.accounts.len(), 18, "Raydium V4 swap requires exactly 18 accounts");
-        
+        assert_eq!(ix.accounts.len(), 18, "Raydium swap requires exactly 18 accounts");
+
         // Verify signer
-        assert!(ix.accounts[17].is_signer, "User authority must be a signer");
+        assert!(ix.accounts[17].is_signer, "User owner (last account) must be signer");
+        
+        // Verify program ID
+        assert_eq!(ix.program_id.to_string(), RAYDIUM_V4_PROGRAM_ID, "Program ID must be Raydium V4");
+    }
+
+    #[test]
+    fn test_instruction_data_bytes() {
+        let data = SwapBaseInData {
+            instruction: 9,
+            amount_in: 1000,
+            min_amount_out: 950,
+        };
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &data as *const _ as *const u8,
+                size_of::<SwapBaseInData>(),
+            )
+        };
+
+        // Verify discriminator
+        assert_eq!(bytes[0], 9);
+        
+        // Verify little-endian encoding
+        assert_eq!(u64::from_le_bytes(bytes[1..9].try_into().unwrap()), 1000);
+        assert_eq!(u64::from_le_bytes(bytes[9..17].try_into().unwrap()), 950);
     }
 }

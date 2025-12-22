@@ -1,142 +1,134 @@
 /// Legacy RPC Transaction Executor
 ///
-/// This module provides a simple way to execute transactions via standard Solana RPC,
-/// bypassing Jito bundles. Useful for testing and development when Jito connectivity
-/// is unavailable or for non-MEV-sensitive operations.
+/// This module sends transactions to the public mempool (RPC) instead of the 
+/// Jito Block Engine. This is your "Testing Mode" executor for development
+/// and non-MEV-sensitive operations.
 
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
-    commitment_config::CommitmentConfig,
     instruction::Instruction,
     signature::{Keypair, Signer},
     transaction::Transaction,
+    commitment_config::CommitmentConfig,
 };
-use anyhow::{Result, Context};
-use tracing::{info, error};
+use std::error::Error;
 
-/// Execute a standard Solana transaction via RPC
-///
-/// # Arguments
-/// * `rpc` - Connected RPC client
-/// * `payer` - Transaction fee payer and signer
-/// * `instructions` - List of instructions to execute atomically
-///
-/// # Returns
-/// Transaction signature string on success
-///
-/// # Errors
-/// Returns error if:
-/// - Failed to get recent blockhash
-/// - Transaction simulation failed
-/// - Transaction confirmation failed
-pub fn execute_standard_tx(
-    rpc: &RpcClient,
-    payer: &Keypair,
-    instructions: &[Instruction],
-) -> Result<String> {
-    info!("Building standard transaction with {} instructions", instructions.len());
+/// Legacy executor using standard Solana RPC
+pub struct LegacyExecutor {
+    client: RpcClient,
+}
 
-    // 1. Get recent blockhash
-    let recent_blockhash = rpc
-        .get_latest_blockhash()
-        .context("Failed to get recent blockhash")?;
-
-    info!("Recent blockhash: {}", recent_blockhash);
-
-    // 2. Build transaction
-    let mut transaction = Transaction::new_with_payer(
-        instructions,
-        Some(&payer.pubkey()),
-    );
-
-    // 3. Sign transaction
-    transaction.sign(&[payer], recent_blockhash);
-
-    info!("Transaction signed. Signature: {}", transaction.signatures[0]);
-
-    // 4. Simulate before sending (safety check)
-    match rpc.simulate_transaction(&transaction) {
-        Ok(simulation) => {
-            if simulation.value.err.is_some() {
-                error!("Transaction simulation failed: {:?}", simulation.value.err);
-                anyhow::bail!("Simulation failed: {:?}", simulation.value.err);
-            }
-            info!("Simulation successful. Logs: {:?}", simulation.value.logs);
-        }
-        Err(e) => {
-            error!("Failed to simulate transaction: {}", e);
-            anyhow::bail!("Simulation error: {}", e);
-        }
+impl LegacyExecutor {
+    /// Create a new legacy executor
+    ///
+    /// # Arguments
+    /// * `rpc_url` - Solana RPC endpoint (e.g., "https://api.mainnet-beta.solana.com")
+    ///
+    /// # Returns
+    /// Configured executor with confirmed commitment level
+    pub fn new(rpc_url: &str) -> Self {
+        let client = RpcClient::new_with_commitment(
+            rpc_url.to_string(),
+            CommitmentConfig::confirmed(),
+        );
+        Self { client }
     }
 
-    // 5. Send and confirm transaction
-    info!("Sending transaction...");
-    let signature = rpc
-        .send_and_confirm_transaction_with_spinner(&transaction)
-        .context("Failed to send and confirm transaction")?;
+    /// Execute a standard transaction via RPC
+    ///
+    /// # Arguments
+    /// * `payer` - Transaction fee payer and signer
+    /// * `ixs` - Instructions to execute atomically
+    ///
+    /// # Returns
+    /// Transaction signature string on success
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Failed to get recent blockhash
+    /// - Transaction building failed
+    /// - Transaction confirmation failed
+    ///
+    /// # Note
+    /// Uses `send_and_confirm_transaction` for testing reliability.
+    /// In production, consider using `send_transaction` with a custom
+    /// confirmation loop for better performance.
+    pub fn execute_standard_tx(
+        &self,
+        payer: &Keypair,
+        ixs: &[Instruction],
+    ) -> Result<String, Box<dyn Error>> {
+        // 1. Get latest blockhash (recent check required for all transactions)
+        let recent_blockhash = self.client.get_latest_blockhash()?;
 
-    info!("Transaction confirmed: {}", signature);
-    Ok(signature.to_string())
-}
+        // 2. Build Transaction
+        let tx = Transaction::new_signed_with_payer(
+            ixs,
+            Some(&payer.pubkey()),
+            &[payer], // Signers
+            recent_blockhash,
+        );
 
-/// Execute transaction without waiting for confirmation (faster, but riskier)
-///
-/// Use this when you don't need to wait for finalization and want maximum throughput.
-/// Note: Transaction may still fail after this function returns success.
-pub fn execute_standard_tx_no_confirm(
-    rpc: &RpcClient,
-    payer: &Keypair,
-    instructions: &[Instruction],
-) -> Result<String> {
-    let recent_blockhash = rpc
-        .get_latest_blockhash()
-        .context("Failed to get recent blockhash")?;
+        // 3. Send and Confirm
+        // We use send_and_confirm for testing reliability. 
+        // In production, use send_transaction with a custom confirmation loop.
+        let signature = self.client.send_and_confirm_transaction(&tx)?;
 
-    let mut transaction = Transaction::new_with_payer(
-        instructions,
-        Some(&payer.pubkey()),
-    );
+        Ok(signature.to_string())
+    }
 
-    transaction.sign(&[payer], recent_blockhash);
+    /// Execute transaction without waiting for confirmation (fire-and-forget)
+    ///
+    /// Faster but riskier - transaction may still fail after this returns success.
+    pub fn execute_no_confirm(
+        &self,
+        payer: &Keypair,
+        ixs: &[Instruction],
+    ) -> Result<String, Box<dyn Error>> {
+        let recent_blockhash = self.client.get_latest_blockhash()?;
 
-    // Send without confirmation
-    let signature = rpc
-        .send_transaction(&transaction)
-        .context("Failed to send transaction")?;
+        let tx = Transaction::new_signed_with_payer(
+            ixs,
+            Some(&payer.pubkey()),
+            &[payer],
+            recent_blockhash,
+        );
 
-    info!("Transaction sent (no confirmation): {}", signature);
-    Ok(signature.to_string())
-}
+        let signature = self.client.send_transaction(&tx)?;
 
-/// Execute with custom commitment level
-pub fn execute_with_commitment(
-    rpc: &RpcClient,
-    payer: &Keypair,
-    instructions: &[Instruction],
-    commitment: CommitmentConfig,
-) -> Result<String> {
-    let recent_blockhash = rpc
-        .get_latest_blockhash_with_commitment(commitment)
-        .context("Failed to get recent blockhash")?
-        .0;
+        Ok(signature.to_string())
+    }
 
-    let mut transaction = Transaction::new_with_payer(
-        instructions,
-        Some(&payer.pubkey()),
-    );
+    /// Execute with custom commitment level
+    pub fn execute_with_commitment(
+        &self,
+        payer: &Keypair,
+        ixs: &[Instruction],
+        commitment: CommitmentConfig,
+    ) -> Result<String, Box<dyn Error>> {
+        let recent_blockhash = self.client
+            .get_latest_blockhash_with_commitment(commitment)?
+            .0;
 
-    transaction.sign(&[payer], recent_blockhash);
+        let tx = Transaction::new_signed_with_payer(
+            ixs,
+            Some(&payer.pubkey()),
+            &[payer],
+            recent_blockhash,
+        );
 
-    // Send with commitment
-    let signature = rpc
-        .send_and_confirm_transaction_with_spinner_and_commitment(
-            &transaction,
+        let signature = self.client.send_and_confirm_transaction_with_spinner_and_commitment(
+            &tx,
             commitment,
-        )
-        .context("Failed to send transaction")?;
+        )?;
 
-    info!("Transaction confirmed with {:?}: {}", commitment, signature);
-    Ok(signature.to_string())
+        Ok(signature.to_string())
+    }
+
+    /// Get reference to underlying RPC client for advanced usage
+    pub fn client(&self) -> &RpcClient {
+        &self.client
+    }
 }
 
 #[cfg(test)]
@@ -145,25 +137,30 @@ mod tests {
     use solana_sdk::{system_instruction, pubkey::Pubkey};
 
     #[test]
-    #[ignore] // Requires RPC connection
+    fn test_executor_creation() {
+        let executor = LegacyExecutor::new("https://api.mainnet-beta.solana.com");
+        // Should create without errors
+        assert!(executor.client().commitment() == CommitmentConfig::confirmed());
+    }
+
+    #[test]
+    #[ignore] // Requires live RPC connection
     fn test_execute_transfer() {
-        // This test requires a live RPC connection
+        // This test requires a live RPC connection and funded account
         // Run with: cargo test --package executor -- --ignored
 
-        let rpc = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+        let executor = LegacyExecutor::new("https://api.mainnet-beta.solana.com");
         let payer = Keypair::new();
         
-        // Create a simple transfer instruction
         let instruction = system_instruction::transfer(
             &payer.pubkey(),
             &Pubkey::new_unique(),
             1_000_000, // 0.001 SOL
         );
 
-        // This will fail without funding, but tests the builder logic
-        let result = execute_standard_tx(&rpc, &payer, &[instruction]);
+        // Expected to fail due to insufficient funds, but tests the builder logic
+        let result = executor.execute_standard_tx(&payer, &[instruction]);
         
-        // Expected to fail due to insufficient funds, but structure should be valid
-        assert!(result.is_err());
+        assert!(result.is_err(), "Should fail without funding");
     }
 }
