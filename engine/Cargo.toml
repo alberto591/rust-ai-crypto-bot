@@ -44,3 +44,8 @@ base64 = "0.21"
 spl-token = "4.0"
 spl-associated-token-account = "2.0"
 anyhow = "1.0"
+
+[features]
+default = []
+simulation = []  # For devnet/testnet dry runs with minimal tips
+production = []  # Enforces strict validation and production-grade settings

@@ -32,14 +32,32 @@ pub struct AppContext {
 async fn main() {
     dotenv().ok();
     
-    // Initialize tracing (Logging)
-    tracing_subscriber::fmt::init();
+    // 1. Custom Panic Handler (Async-Safe Logging)
+    std::panic::set_hook(Box::new(|panic_info| {
+        eprintln!("🚨 FATAL PANIC: {:?}", panic_info);
+        eprintln!("💥 Thread panicked. Initiating emergency shutdown...");
+    }));
+    
+    // 2. Configurable Logging with RUST_LOG
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        )
+        .init();
     
     info!("🚀 HFT Engine Bootstrapping [Composition Root]...");
 
-    // 1. Unified Configuration Layer
+    // 3. Unified Configuration Layer
     let config = config::BotConfig::new().expect("CRITICAL: Failed to load config. Check .env");
-    info!("✅ Config Loaded: RPC={}, Jito={}", config.rpc_url, config.jito_url);
+    
+    // 4. Startup Validation (Fail Fast)
+    if let Err(e) = config.validate() {
+        error!("❌ Configuration Validation Failed: {}", e);
+        std::process::exit(1);
+    }
+    
+    info!("✅ Config Loaded & Validated: RPC={}, Jito={}", config.rpc_url, config.jito_url);
     
     let key_path = if config.keypair_path.is_empty() {
         format!("{}/.config/solana/id.json", env::var("HOME").unwrap())
