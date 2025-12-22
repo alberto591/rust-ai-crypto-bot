@@ -17,11 +17,16 @@ pub struct PoolUpdate {
     pub timestamp: u64,
 }
 
+/// A comprehensive market update signal
+/// Carries both price (reserves) and topology (token mints) information
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MarketUpdate {
-    pub pool: Pubkey,
-    pub price: f64,
-    pub timestamp: u64,
+    pub pool_address: Pubkey,
+    pub coin_mint: Pubkey,  // Token A (e.g., SOL)
+    pub pc_mint: Pubkey,    // Token B (e.g., USDC)
+    pub coin_reserve: u64,
+    pub pc_reserve: u64,
+    pub timestamp: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
