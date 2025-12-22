@@ -1,6 +1,12 @@
-pub mod raydium_builder;
-pub mod orca_builder;
-pub mod legacy;
+// Instruction Builders (Ready)
+pub mod raydium_builder;  // ✅ Raydium V4 swap factory
+pub mod orca_builder;     // ✅ Orca Whirlpool swap (placeholder)
+
+// Executors
+pub mod legacy;           // ✅ Standard RPC executor (use today)
+// pub mod jito;          // ⏳ Jito bundle executor (waiting on connectivity)
+
+
 
 use std::sync::Arc;
 use jito_searcher_client::get_searcher_client_auth;
