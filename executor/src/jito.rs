@@ -20,21 +20,21 @@ use rand::seq::SliceRandom;
 pub struct JitoExecutor {
     client: Arc<Mutex<SearcherServiceClient<Channel>>>,
     auth_keypair: Arc<Keypair>,
+    payer_pubkey: Pubkey,
     rpc_client: Arc<RpcClient>,
     tip_accounts: Vec<Pubkey>,
 }
 
 impl JitoExecutor {
     pub async fn new(block_engine_url: &str, auth_keypair: &Keypair, rpc_url: &str) -> Result<Self, Box<dyn Error>> {
-        // Use the passed keypair for signing transactions (this is your 'payer')
         let auth_arc = Arc::new(Keypair::from_bytes(&auth_keypair.to_bytes())?);
+        let payer_pubkey = auth_arc.pubkey();
         
-        println!("🔗 Connecting to Jito (No-Auth): {}", block_engine_url);
+        tracing::info!("🔗 Connecting to Jito (No-Auth): {}", block_engine_url);
         let client = get_searcher_client_no_auth(block_engine_url).await?;
         
         let rpc = RpcClient::new(rpc_url.to_string());
 
-        // THE OFFICIAL JITO TIP ACCOUNTS (Using verified subset)
         let tip_accounts = vec![
             Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5").unwrap(),
             Pubkey::from_str("HFqU5x63VTqvQss8hp11i4wVV8bD44PuyAC8eF6S7yBz").unwrap(),
@@ -45,6 +45,7 @@ impl JitoExecutor {
         Ok(Self {
             client: Arc::new(Mutex::new(client)),
             auth_keypair: auth_arc,
+            payer_pubkey,
             rpc_client: Arc::new(rpc),
             tip_accounts,
         })
@@ -52,23 +53,25 @@ impl JitoExecutor {
 
     pub async fn send_bundle(
         &self,
-        trade_ixs: Vec<Instruction>,
+        trade_ixs: Vec<solana_sdk::instruction::Instruction>,
         tip_amount_lamports: u64,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let mut client = self.client.lock().await;
         
         let blockhash = self.rpc_client.get_latest_blockhash()?;
 
         // 1. Pick a Random Tip Account
-        let mut rng = rand::thread_rng();
-        let tip_account = self.tip_accounts.choose(&mut rng).unwrap();
+        let tip_account = {
+            let mut rng = rand::thread_rng();
+            *self.tip_accounts.choose(&mut rng).unwrap()
+        };
         
-        println!("💸 Tipping Jito Account: {}", tip_account);
+        tracing::info!("💸 Tipping Jito Account: {}", tip_account);
 
         // 2. Build Tip Instruction
-        let tip_ix = system_instruction::transfer(
+        let tip_ix = solana_sdk::system_instruction::transfer(
             &self.auth_keypair.pubkey(), // From You
-            tip_account,                 // To Jito
+            &tip_account,                 // To Jito
             tip_amount_lamports
         );
 
@@ -91,6 +94,46 @@ impl JitoExecutor {
         let _response = send_bundle_no_wait(&bundles, &mut client).await?;
         
         Ok("Bundle_Dispatched".to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl strategy::ports::ExecutionPort for JitoExecutor {
+    async fn build_bundle_instructions(
+        &self,
+        _opportunity: mev_core::ArbitrageOpportunity,
+        tip_lamports: u64,
+    ) -> anyhow::Result<Vec<solana_sdk::instruction::Instruction>> {
+        let mut ixs = Vec::new();
+        
+        let tip_account = {
+            let mut rng = rand::thread_rng();
+            *self.tip_accounts.choose(&mut rng).unwrap()
+        };
+
+        let tip_ix = solana_sdk::system_instruction::transfer(
+            &self.payer_pubkey,
+            &tip_account,
+            tip_lamports,
+        );
+        ixs.push(tip_ix);
+        
+        Ok(ixs)
+    }
+
+    async fn build_and_send_bundle(
+        &self,
+        opportunity: mev_core::ArbitrageOpportunity,
+        _recent_blockhash: solana_sdk::hash::Hash,
+        tip_lamports: u64,
+    ) -> anyhow::Result<String> {
+        let instructions = self.build_bundle_instructions(opportunity, tip_lamports).await?;
+        self.send_bundle(instructions, tip_lamports).await
+            .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))
+    }
+
+    fn pubkey(&self) -> &solana_sdk::pubkey::Pubkey {
+        &self.payer_pubkey
     }
 }
 

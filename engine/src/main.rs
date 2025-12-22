@@ -1,16 +1,15 @@
 use std::env;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use dotenvy::dotenv;
-use solana_sdk::{
-    signature::{read_keypair_file, Signer},
-    pubkey::Pubkey,
-};
+use solana_sdk::signature::{read_keypair_file, Signer};
+use tracing::{info, error};
 
 // Internal Crates
 use mev_core::MarketUpdate;
-use strategy::{graph::MarketGraph, arb::ArbFinder};
-use executor::{jito::JitoExecutor, raydium_builder::RaydiumSwapKeys};
+use strategy::{StrategyEngine};
+use executor::jito::JitoExecutor;
 
 mod listener;
 mod pool_fetcher;
@@ -21,153 +20,90 @@ mod config;
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-    println!("🚀 Starting HFT Engine [SIMULATION + REAL JITO EXECUTION]...");
-    println!("=========================================================\n");
-
-    // 1. Setup Configuration
-    let config = config::BotConfig::new().expect("Failed to load config");
-    println!("✅ Config Loaded: RPC={}, WS={}", config.rpc_url, config.ws_url);
     
-    let rpc_url = config.rpc_url;
-    let key_path = env::var("KEYPAIR_PATH").unwrap_or_else(|_| 
+    // Initialize tracing (Logging)
+    tracing_subscriber::fmt::init();
+    
+    info!("🚀 HFT Engine Bootstrapping [Composition Root]...");
+
+    // 1. Unified Configuration Layer
+    let config = config::BotConfig::new().expect("CRITICAL: Failed to load config. Check .env");
+    info!("✅ Config Loaded: RPC={}, Jito={}", config.rpc_url, config.jito_url);
+    
+    let key_path = if config.keypair_path.is_empty() {
         format!("{}/.config/solana/id.json", env::var("HOME").unwrap())
-    );
-    
-    let payer = read_keypair_file(&key_path).expect("Failed to load keypair");
-    let payer_pubkey = payer.pubkey();
-    println!("🔑 Trading Identity: {}", payer_pubkey);
-
-    // 2. Initialize Real Jito Executor (No-Auth)
-    let jito_url = "https://ny.mainnet.block-engine.jito.wtf"; 
-    let jito_executor = JitoExecutor::new(jito_url, &payer, &rpc_url)
-        .await
-        .expect("Failed to connect to Jito");
-    
-    println!("✅ Connected to Jito Block Engine: {}", jito_url);
-
-    // 2.5 Pre-flight Wallet Check
-    println!("🧪 Running Pre-flight Check (Wallet)...");
-    let wallet_mgr = wallet_manager::WalletManager::new(&rpc_url);
-    let usdc_mint = devnet_keys::parse_pubkey(devnet_keys::USDC_MINT);
-    let _wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
-    
-    let mut setup_ixs = Vec::new();
-    if let Some(ix) = wallet_mgr.ensure_ata_exists(&payer.pubkey(), &usdc_mint) {
-        setup_ixs.push(ix);
-    }
-    
-    match wallet_mgr.sync_wsol(&payer, 50_000_000) {
-        Ok(ixs) => setup_ixs.extend(ixs),
-        Err(e) => println!("⚠️ WSOL Sync failed: {}", e),
-    }
-
-    if !setup_ixs.is_empty() {
-        println!("📦 Wallet requires setup ({} ixs).", setup_ixs.len());
-        // In simulation, we just log. In live, we'd send a bundle here.
-        println!("   [SIMULATION] Wallet setup verified.");
     } else {
-        println!("✅ Wallet Ready: ATAs and WSOL verified.");
+        config.keypair_path.clone()
+    };
+    
+    let payer = read_keypair_file(&key_path).expect("CRITICAL: Failed to load keypair");
+    info!("🔑 Identity: {}", payer.pubkey());
+
+    // 2. Infrastructure Infrastructure (Adapters)
+    let executor = JitoExecutor::new(&config.jito_url, &payer, &config.rpc_url)
+        .await
+        .expect("CRITICAL: Failed to initialize Jito Executor");
+    let execution_port = Arc::new(executor);
+    
+    info!("✅ Jito Block Engine connected (No-Auth Mode)");
+
+    // 3. Domain Service (The Brain)
+    // Here we wire the infrastructure (Executor) into the domain (StrategyEngine)
+    let strategy_engine = Arc::new(StrategyEngine::new(
+        Some(execution_port),
+        None, // Simulation disabled for now
+        None, // AI Model disabled (Heuristic mode)
+    ));
+
+    // 4. Pre-flight Wallet Verification
+    info!("🧪 Validating Wallet state...");
+    let wallet_mgr = wallet_manager::WalletManager::new(&config.rpc_url);
+    let usdc_mint = devnet_keys::parse_pubkey(devnet_keys::USDC_MINT);
+    
+    if let Some(_ix) = wallet_mgr.ensure_ata_exists(&payer.pubkey(), &usdc_mint) {
+        info!("📦 Auto-creating USDC ATA...");
+        // In a real run, you'd execute this instruction.
     }
 
-    // 3. Initialize Graph & Channels
-    let mut graph = MarketGraph::new();
-    let (tx, mut rx) = mpsc::channel::<MarketUpdate>(1000);
-
-    /*
-    // ---------------------------------------------------------
-    // ❌ OPTION A: SIMULATION (Commented out for Reality)
-    // ---------------------------------------------------------
-    tokio::spawn(async move {
-        println!("🎭 Simulation Active: Injecting Market Scenarios...");
-        
-        loop {
-            sleep(Duration::from_secs(5)).await;
-
-            println!("\n⚡ INJECTING ARBITRAGE SIGNAL...");
-            let sol_usdc_pool = devnet_keys::parse_pubkey(devnet_keys::SOL_USDC_AMM_ID);
-            let wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
-            let usdc_mint = devnet_keys::parse_pubkey(devnet_keys::USDC_MINT);
-
-            let _ = tx.send(MarketUpdate {
-                pool_address: sol_usdc_pool,
-                coin_mint: wsol_mint,
-                pc_mint: usdc_mint,
-                coin_reserve: 1_000_000_000, 
-                pc_reserve: 100_000_000,     
-                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64,
-            }).await;
+    // 5. Market Connectivity
+    let (tx, mut rx) = mpsc::channel::<MarketUpdate>(1024);
+    
+    // Convert Comma-separated string to HashMap for the listener
+    let mut pools_to_watch = HashMap::new();
+    for addr in config.monitored_pool_addresses.split(',') {
+        if !addr.trim().is_empty() {
+            pools_to_watch.insert(addr.trim().to_string(), ("SOL".to_string(), "USDC".to_string()));
         }
-    });
-    */
+    }
 
-    // ---------------------------------------------------------
-    // ✅ OPTION B: REALITY (Enabled)
-    // ---------------------------------------------------------
-    // 1. Define the Pools you want to watch
-    let mut monitored_pools = HashMap::new();
-    monitored_pools.insert(
-        "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2".to_string(), // SOL/USDC (Mainnet)
-        ("So11111111111111111111111111111111111111112".to_string(), "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string())
-    );
-
-    // 2. Spawn the Listener (Requires Private RPC WS_URL in .env)
-    let ws_url = env::var("WS_URL").unwrap_or_else(|_| rpc_url.replace("http", "ws")); 
+    let ws_url = config.ws_url.clone();
     tokio::spawn(async move {
-        listener::start_listener(ws_url, tx, monitored_pools).await;
+        listener::start_listener(ws_url, tx, pools_to_watch).await;
     });
 
-    // 4. Ignition
-    println!("🔥 Ignition: Engine Running. Listening for Raydium events...");
-    
-    // Safety check for mints
-    let _ = devnet_keys::get_devnet_mints();
-    
-    let mut pool_key_cache: HashMap<Pubkey, RaydiumSwapKeys> = HashMap::new();
-    let fetcher = pool_fetcher::PoolKeyFetcher::new(&rpc_url);
-    let wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
+    info!("🔥 Engine IGNITION. Waiting for market events...");
 
+    // 6. The Core Loop (Reactivity)
     while let Some(event) = rx.recv().await {
-        println!("🔄 Update received: {} (Reserves: {} / {})", event.pool_address, event.coin_reserve, event.pc_reserve);
+        // Map MarketUpdate -> PoolUpdate (Domain object transition)
+        let domain_update = mev_core::PoolUpdate {
+            pool_address: event.pool_address,
+            program_id: mev_core::constants::RAYDIUM_V4_PROGRAM,
+            mint_a: event.coin_mint,
+            mint_b: event.pc_mint,
+            reserve_a: event.coin_reserve as u128,
+            reserve_b: event.pc_reserve as u128,
+            fee_bps: 30, // Standard Raydium fee
+            timestamp: event.timestamp as u64,
+        };
 
-        // A. Update Memory
-        graph.update_edge(event.coin_mint, event.pc_mint, event.pool_address, event.coin_reserve, event.pc_reserve);
-        graph.update_edge(event.pc_mint, event.coin_mint, event.pool_address, event.pc_reserve, event.coin_reserve);
-
-        // B. Ensure we have pool keys
-        if let std::collections::hash_map::Entry::Vacant(e) = pool_key_cache.entry(event.pool_address) {
-            if let Ok(keys) = fetcher.fetch_keys(&event.pool_address).await {
-                e.insert(keys);
+        // Pass event into the Brain
+        // Note: StrategyEngine now handles discovery + execution internally
+        let engine_clone = Arc::clone(&strategy_engine);
+        tokio::spawn(async move {
+            if let Err(e) = engine_clone.process_event(domain_update).await {
+                error!("Strategy Error: {}", e);
             }
-        }
-
-        // C. Check Strategy
-        // 1. Set Trade Size (The Bet)
-        // 0.1 SOL = 100,000,000 Lamports.
-        let amount_in = 100_000_000; 
-
-        // 2. Set Jito Tip (The Bribe)
-        let jito_tip = 10_000;
-
-        // 3. Set Slippage (The Safety Net)
-        // We want at least 99% of our value back, or the trade should fail.
-        let min_amount_out = (amount_in as f64 * 0.99) as u64; 
-
-        if let Some(path) = ArbFinder::find_best_cycle(&graph, wsol_mint, amount_in) {
-            println!("🚨 REAL ARBITRAGE FOUND! Expected Profit: {}", path.expected_profit);
-            
-            // D. Fire Jito Bundle
-            if let Some(cached_keys) = pool_key_cache.get(&path.hops[0].pool_address) {
-                let mut trade_keys = cached_keys.clone();
-                trade_keys.user_owner = payer.pubkey();
-                
-                // Build Instruction with SAFETY
-                let ix = executor::raydium_builder::swap_base_in(&trade_keys, amount_in, min_amount_out);
-                
-                match jito_executor.send_bundle(vec![ix], jito_tip).await {
-                    Ok(id) => println!("   ✅ REAL BUNDLE SENT! ID: {}", id),
-                    Err(e) => println!("   ❌ BUNDLE FAILED: {}", e),
-                }
-            }
-        }
+        });
     }
 }

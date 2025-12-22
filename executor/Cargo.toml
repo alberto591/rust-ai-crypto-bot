@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 mev-core = { path = "../core" }
+strategy = { path = "../strategy" }
 solana-client = "1.17"
 solana-sdk = "1.17"
 spl-token = "4.0"
@@ -19,4 +20,5 @@ tracing = "0.1"
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 rand = "0.8"
+thiserror = "1.0"
 

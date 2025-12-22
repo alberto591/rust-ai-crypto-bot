@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 mev-core = { path = "../core" }
-executor = { path = "../executor" }
 polars = { version = "0.36", features = ["lazy", "parquet"] }
 petgraph = "0.6"
 tracing = "0.1"
@@ -15,3 +14,4 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 solana-sdk = "1.17"
 async-trait = "0.1"
+thiserror = "1.0"

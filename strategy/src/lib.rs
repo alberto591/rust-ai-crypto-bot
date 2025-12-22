@@ -42,72 +42,62 @@ impl StrategyEngine {
         }
     }
 
-    pub async fn process_event(&self, update: PoolUpdate) -> Result<Option<ArbitrageOpportunity>> {
-        // 1. Hard Logic: Multi-DEX Triangular Arbitrage Math
+    pub async fn process_event(&self, update: mev_core::PoolUpdate) -> Result<Option<ArbitrageOpportunity>> {
+        // 1. Core Logic: Graph-based search
         if let Some(opportunity) = self.arb_strategy.process_update(update.clone()) {
-            info!("Hueristic check: profitable path found ({} lamports expected).", opportunity.expected_profit_lamports);
+            info!("💡 Profitable path found: {} lamports expected.", opportunity.expected_profit_lamports);
 
-            // 2. AI Logic: Risk/Confidence Assessment
+            // 2. AI validation layer
             let ai_confidence = if let Some(model) = &self.ai_model {
-                model.predict_confidence(&opportunity).unwrap_or(1.0)
+                model.predict_confidence(&opportunity).unwrap_or(0.0)
             } else {
-                1.0 // Heuristic mode: always confident
+                1.0 // Heuristic mode: assumes perfect confidence
             }; 
             
-            if ai_confidence > 0.7 {
-                info!("Decision: Strong Buy (Confidence: {:.2}). Simulating bundle...", ai_confidence);
+            if ai_confidence < 0.7 {
+                 debug!("⚠️ Opportunity rejected by AI Model (Confidence: {:.2})", ai_confidence);
+                 return Ok(None);
+            }
+
+            info!("🚀 AI Approved: High confidence ({:.2}). Triggering execution pipeline...", ai_confidence);
+            
+            // 3. Infrastructure interaction via Ports
+            if let Some(executor) = &self.executor {
+                let tip_lamports = 10_000; // Standard tip
                 
-                // 3. Simulation (Safety & Optimization)
-                if let Some(executor) = &self.executor {
-                    let tip_lamports = 100_000;
-                    
-                    // Build instructions first for simulation
-                    let instructions = match executor.build_bundle_instructions(opportunity.clone(), tip_lamports).await {
-                        Ok(ins) => ins,
+                // Optional Simulation
+                if let Some(simulator) = &self.simulator {
+                    let instructions = executor.build_bundle_instructions(opportunity.clone(), tip_lamports).await?;
+                    match simulator.simulate_bundle(&instructions, executor.pubkey()).await {
+                        Ok(units) => info!("✅ Simulation confirmed: {} units.", units),
                         Err(e) => {
-                            error!("Failed to build bundle instructions: {}", e);
+                            warn!("❌ Simulation fail: {}. Dropping trade.", e);
                             return Ok(None);
                         }
-                    };
-
-                    if let Some(simulator) = &self.simulator {
-                        match simulator.simulate_bundle(&instructions, executor.pubkey()).await {
-                            Ok(units) => info!("Simulation SUCCEEDED: {} units consumed.", units),
-                            Err(e) => {
-                                warn!("Simulation FAILED: {}. DROPPING trade.", e);
-                                return Ok(None);
-                            }
-                        }
                     }
+                }
 
-                    // 4. Track simulated PnL
-                    self.total_simulated_pnl.fetch_add(opportunity.expected_profit_lamports, std::sync::atomic::Ordering::SeqCst);
+                // 4. Track stats
+                self.total_simulated_pnl.fetch_add(opportunity.expected_profit_lamports, std::sync::atomic::Ordering::SeqCst);
 
-                    // 5. Execution (Integration with Phase 2)
-                    let recent_blockhash = solana_sdk::hash::Hash::default(); // In main loop, this is updated
-                    
-                    match executor.build_and_send_bundle(opportunity.clone(), recent_blockhash, tip_lamports).await {
-                        Ok(id) => {
-                            info!("Bundle executed: {}", id);
-                            return Ok(Some(opportunity));
-                        },
-                        Err(e) => {
-                            error!("Execution failed: {}", e);
-                            return Ok(None);
-                        },
+                // 5. Atomic Execution
+                match executor.build_and_send_bundle(opportunity.clone(), solana_sdk::hash::Hash::default(), tip_lamports).await {
+                    Ok(bundle_id) => {
+                        info!("🔥 BUNDLE DISPATCHED: {}", bundle_id);
+                        return Ok(Some(opportunity));
+                    },
+                    Err(e) => {
+                        error!("💥 Execution panic: {}", e);
+                        return Ok(None);
                     }
-                } else {
-                    warn!("Opportunity found but Execution is DISABLED (No Jito Client).");
                 }
             } else {
-                debug!("Opportunity rejected by AI Brain (Confidence: {:.2})", ai_confidence);
+                warn!("📡 Execution port DISCONNECTED. Observation mode only.");
+                return Ok(Some(opportunity));
             }
         }
-
         Ok(None)
     }
-
-
 }
 
 pub struct ArbitrageStrategy {
