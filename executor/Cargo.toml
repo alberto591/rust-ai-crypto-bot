@@ -16,6 +16,6 @@ prost = "0.12"
 tokio = { version = "1.36", features = ["full"] }
 yellowstone-grpc-client = { version = "1.13", default-features = false }
 tracing = "0.1"
-strategy = { path = "../strategy" }
 anyhow = "1.0.100"
 async-trait = "0.1.89"
+

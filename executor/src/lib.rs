@@ -1,3 +1,7 @@
+pub mod raydium_builder;
+pub mod orca_builder;
+pub mod legacy;
+
 use std::sync::Arc;
 use jito_searcher_client::get_searcher_client_auth;
 use jito_searcher_client::token_authenticator::ClientInterceptor;
@@ -129,34 +133,5 @@ impl JitoClient {
         let mut client = self.client.lock().await;
         let response = client.get_tip_accounts(jito_protos::searcher::GetTipAccountsRequest {}).await?;
         Ok(response.into_inner().accounts)
-    }
-}
-
-// Implement ExecutionPort for hexagonal architecture compliance
-#[async_trait::async_trait]
-impl strategy::ports::ExecutionPort for JitoClient {
-    async fn build_bundle_instructions(
-        &self,
-        opportunity: ArbitrageOpportunity,
-        tip_lamports: u64,
-    ) -> Result<Vec<Instruction>, anyhow::Error> {
-        self.build_bundle_instructions(opportunity, tip_lamports)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
-    }
-
-    async fn build_and_send_bundle(
-        &self,
-        opportunity: ArbitrageOpportunity,
-        recent_blockhash: solana_sdk::hash::Hash,
-        tip_lamports: u64,
-    ) -> Result<String, anyhow::Error> {
-        self.build_and_send_bundle(opportunity, recent_blockhash, tip_lamports)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
-    }
-
-    fn pubkey(&self) -> &Pubkey {
-        &self.keypair.pubkey()
     }
 }
