@@ -43,3 +43,4 @@ tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
 base64 = "0.21"
 spl-token = "4.0"
 spl-associated-token-account = "2.0"
+anyhow = "1.0"

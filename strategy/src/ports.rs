@@ -10,20 +10,21 @@ use solana_sdk::{instruction::Instruction, pubkey::Pubkey, hash::Hash};
 #[async_trait::async_trait]
 pub trait AIModelPort: Send + Sync {
     /// Predict confidence score for an arbitrage opportunity
-    /// 
-    /// # Arguments
-    /// * `opportunity` - The arbitrage opportunity to evaluate
-    /// 
-    /// # Returns
-    /// * `f32` - Confidence score between 0.0 and 1.0
     fn predict_confidence(&self, opportunity: &ArbitrageOpportunity) -> Result<f32>;
+}
+
+/// Port for resolving pool keys required for instruction building
+/// Decouples the executor from specific RPC or local database clients
+#[async_trait::async_trait]
+pub trait PoolKeyProvider: Send + Sync {
+    async fn get_swap_keys(&self, pool_address: &Pubkey) -> Result<mev_core::raydium::RaydiumSwapKeys>;
 }
 
 /// Port for bundle execution services
 /// Abstracts the details of transaction submission (Jito, direct RPC, etc.)
 #[async_trait::async_trait]
 pub trait ExecutionPort: Send + Sync {
-    /// Build transaction instructions for an arbitrage opportunity
+    /// Build instructions for an opportunity (for simulation or external use)
     async fn build_bundle_instructions(
         &self,
         opportunity: ArbitrageOpportunity,
@@ -43,7 +44,6 @@ pub trait ExecutionPort: Send + Sync {
 }
 
 /// Port for bundle simulation services
-/// Already exists but documented here for completeness
 #[async_trait::async_trait]
 pub trait BundleSimulator: Send + Sync {
     async fn simulate_bundle(

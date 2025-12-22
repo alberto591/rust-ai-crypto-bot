@@ -4,17 +4,27 @@ use std::error::Error;
 use std::str::FromStr;
 
 // Internal dependencies
-use mev_core::raydium::AmmInfo; 
-use executor::raydium_builder::RaydiumSwapKeys;
+use mev_core::raydium::{AmmInfo, RaydiumSwapKeys}; 
 
-pub(crate) struct PoolKeyFetcher {
-    rpc: RpcClient,
+use std::sync::Arc;
+
+pub struct PoolKeyFetcher {
+    rpc: Arc<RpcClient>,
+}
+
+#[async_trait::async_trait]
+impl strategy::ports::PoolKeyProvider for PoolKeyFetcher {
+    async fn get_swap_keys(&self, pool_id: &Pubkey) -> Result<RaydiumSwapKeys, anyhow::Error> {
+        let keys = self.fetch_keys(pool_id).await
+            .map_err(|e| anyhow::anyhow!("Key fetch error: {}", e))?;
+        Ok(keys)
+    }
 }
 
 impl PoolKeyFetcher {
     pub fn new(rpc_url: &str) -> Self {
         Self {
-            rpc: RpcClient::new(rpc_url.to_string()),
+            rpc: Arc::new(RpcClient::new(rpc_url.to_string())),
         }
     }
 

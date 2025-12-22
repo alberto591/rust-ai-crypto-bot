@@ -51,9 +51,16 @@ async fn main() {
     info!("🔑 Identity: {}", payer.pubkey());
 
     // 2. Infrastructure (Adapters)
-    let executor = JitoExecutor::new(&config.jito_url, &payer, &config.rpc_url)
-        .await
-        .expect("CRITICAL: Failed to initialize Jito Executor");
+    let key_fetcher = Arc::new(pool_fetcher::PoolKeyFetcher::new(&config.rpc_url));
+    
+    let executor = JitoExecutor::new(
+        &config.jito_url, 
+        &payer, 
+        &config.rpc_url,
+        Some(Arc::clone(&key_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>)
+    )
+    .await
+    .expect("CRITICAL: Failed to initialize Jito Executor");
     let execution_port = Arc::new(executor);
     
     info!("✅ Jito Block Engine connected (No-Auth Mode)");

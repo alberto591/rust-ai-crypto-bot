@@ -24,29 +24,7 @@ struct SwapBaseInData {
     min_amount_out: u64,
 }
 
-/// All account keys required for a Raydium V4 swap
-/// Order is CRITICAL - must match Raydium program expectations exactly
-#[derive(Clone, Debug)]
-pub struct RaydiumSwapKeys {
-    pub amm_id: Pubkey,
-    pub amm_authority: Pubkey,
-    pub amm_open_orders: Pubkey,
-    pub amm_target_orders: Pubkey,
-    pub amm_coin_vault: Pubkey,
-    pub amm_pc_vault: Pubkey,
-    pub serum_program_id: Pubkey,
-    pub serum_market: Pubkey,
-    pub serum_bids: Pubkey,
-    pub serum_asks: Pubkey,
-    pub serum_event_queue: Pubkey,
-    pub serum_coin_vault: Pubkey,
-    pub serum_pc_vault: Pubkey,
-    pub serum_vault_signer: Pubkey,
-    pub user_source_token_account: Pubkey,
-    pub user_dest_token_account: Pubkey,
-    pub user_owner: Pubkey,
-    pub token_program: Pubkey,
-}
+use mev_core::raydium::RaydiumSwapKeys;
 
 /// Build a Raydium V4 "Swap Base In" instruction
 ///
