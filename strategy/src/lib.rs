@@ -13,10 +13,8 @@ use anyhow::Result;
 use crate::ports::{AIModelPort, ExecutionPort, BundleSimulator};
 use solana_sdk::instruction::Instruction;
 
-#[async_trait::async_trait]
-pub trait BundleSimulator: Send + Sync {
-    async fn simulate_bundle(&self, instructions: &[Instruction], payer: &Pubkey) -> std::result::Result<u64, String>;
-}
+// BundleSimulator trait is imported from ports
+
 
 pub struct StrategyEngine {
     arb_strategy: ArbitrageStrategy,
