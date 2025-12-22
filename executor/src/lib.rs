@@ -4,7 +4,7 @@ pub mod orca_builder;     // ✅ Orca Whirlpool swap (placeholder)
 
 // Executors
 pub mod legacy;           // ✅ Standard RPC executor (use today)
-// pub mod jito;          // ⏳ Jito bundle executor (waiting on connectivity)
+pub mod jito;             // ✅ Jito bundle executor (Ready)
 
 
 
