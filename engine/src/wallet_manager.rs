@@ -83,3 +83,30 @@ impl WalletManager {
         )?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unwrap_wsol_instruction() {
+        let payer = Pubkey::new_unique();
+        let wallet_mgr = WalletManager::new("http://localhost:8899");
+        
+        let ix_result = wallet_mgr.unwrap_wsol(&payer);
+        assert!(ix_result.is_ok());
+        
+        let ix = ix_result.unwrap();
+        // Check program ID (Token Program)
+        assert_eq!(ix.program_id, spl_token::id());
+        
+        // Check number of accounts (CloseAccount needs: account, destination, owner)
+        // spl-token close_account typically has 3 accounts + signer M of N (if multisig)
+        // but here it's 3 accounts (ata, destination, owner)
+        assert!(ix.accounts.len() >= 3);
+        
+        // Destination should be the payer
+        assert_eq!(ix.accounts[1].pubkey, payer);
+        assert_eq!(ix.accounts[2].pubkey, payer);
+    }
+}

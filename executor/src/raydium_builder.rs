@@ -138,6 +138,7 @@ pub fn swap_base_in(
 mod tests {
     use super::*;
     use spl_token;
+    use std::str::FromStr;
 
     #[test]
     fn test_instruction_layout() {

@@ -6,6 +6,7 @@
 use executor::{legacy::LegacyExecutor, raydium_builder::{RaydiumSwapKeys, swap_base_in}};
 use solana_sdk::{
     signature::{Keypair, read_keypair_file},
+    signer::Signer,
     pubkey::Pubkey,
 };
 use std::str::FromStr;

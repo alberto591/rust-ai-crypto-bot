@@ -70,3 +70,24 @@ impl PoolKeyFetcher {
         Ok(keys)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_raydium_authority_derivation() {
+        // Standard Raydium V4 Program ID
+        let program_id = Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8").unwrap();
+        
+        // Derive Authority (PDA)
+        let (authority, _) = Pubkey::find_program_address(
+            &[&b"amm authority"[..]], 
+            &program_id
+        );
+
+        // This is the value produced by find_program_address with [b"amm authority"]
+        let expected_authority = Pubkey::from_str("5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1").unwrap();
+        assert_eq!(authority, expected_authority);
+    }
+}

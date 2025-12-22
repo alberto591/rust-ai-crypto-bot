@@ -17,6 +17,7 @@ mod listener;
 mod pool_fetcher;
 mod devnet_keys;
 mod wallet_manager;
+mod config;
 
 #[tokio::main]
 async fn main() {
@@ -134,20 +135,29 @@ async fn main() {
         }
 
         // C. Check Strategy
-        let amount_in = 100_000_000; // 0.1 SOL
+        // 1. Set Trade Size (The Bet)
+        // 0.1 SOL = 100,000,000 Lamports.
+        let amount_in = 100_000_000; 
+
+        // 2. Set Jito Tip (The Bribe)
+        let jito_tip = 10_000;
+
+        // 3. Set Slippage (The Safety Net)
+        // We want at least 99% of our value back, or the trade should fail.
+        let min_amount_out = (amount_in as f64 * 0.99) as u64; 
+
         if let Some(path) = ArbFinder::find_best_cycle(&graph, wsol_mint, amount_in) {
-            println!("🚨 REAL ARBITRAGE FOUND! Profit: {}", path.expected_profit);
+            println!("🚨 REAL ARBITRAGE FOUND! Expected Profit: {}", path.expected_profit);
             
             // D. Fire Jito Bundle
             if let Some(cached_keys) = pool_key_cache.get(&path.hops[0].pool_address) {
                 let mut trade_keys = cached_keys.clone();
                 trade_keys.user_owner = payer.pubkey();
                 
-                // Note: Slippage is hardcoded for MVP, should be 0.99x expected_out in prod
-                let ix = executor::raydium_builder::swap_base_in(&trade_keys, amount_in, 1);
-                let tip = 10_000; // Micro-tip
+                // Build Instruction with SAFETY
+                let ix = executor::raydium_builder::swap_base_in(&trade_keys, amount_in, min_amount_out);
                 
-                match jito_executor.send_bundle(vec![ix], tip).await {
+                match jito_executor.send_bundle(vec![ix], jito_tip).await {
                     Ok(id) => println!("   ✅ REAL BUNDLE SENT! ID: {}", id),
                     Err(e) => println!("   ❌ BUNDLE FAILED: {}", e),
                 }

@@ -25,3 +25,28 @@ impl BotConfig {
         s.try_deserialize()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn test_config_from_env() {
+        env::set_var("RPC_URL", "https://test.rpc");
+        env::set_var("WS_URL", "wss://test.ws");
+        env::set_var("PRIVATE_KEY", "test_key");
+        env::set_var("DRY_RUN", "true");
+        env::set_var("SIMULATION", "false");
+        env::set_var("POOLS", "pool1,pool2");
+        env::set_var("DATA_OUTPUT_DIR", "./test_data");
+        env::set_var("BLOCK_ENGINE_URL", "https://test.block.engine");
+
+        let config = BotConfig::new().expect("Failed to load config");
+        
+        assert_eq!(config.rpc_url, "https://test.rpc");
+        assert_eq!(config.ws_url, "wss://test.ws");
+        assert_eq!(config.dry_run, true);
+        assert_eq!(config.simulation, false);
+    }
+}
