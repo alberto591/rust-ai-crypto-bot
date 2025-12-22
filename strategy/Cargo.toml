@@ -15,3 +15,5 @@ anyhow = "1.0"
 solana-sdk = "1.17"
 async-trait = "0.1"
 thiserror = "1.0"
+parking_lot = "0.12"    # Faster mutexes/locks than std::sync
+smallvec = "1.11"       # Stack-allocated vectors for hot paths

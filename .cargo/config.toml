@@ -1,0 +1,5 @@
+[build]
+rustflags = [
+    "-C", "target-cpu=native",              # Use all CPU features (AVX2, SSE4.2, AES)
+    "-C", "target-feature=+aes,+avx2,+sse4.2",
+]

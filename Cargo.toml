@@ -13,6 +13,11 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 debug = false
+strip = true              # Remove debug symbols for smaller binary
+overflow-checks = false   # Disable runtime overflow checks (HFT: speed > safety)
+
+[profile.release.package."*"]
+opt-level = 3             # Optimize all dependencies
 
 [patch.crates-io]
 protobuf-src = { path = "libs/protobuf-src-stub" }

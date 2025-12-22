@@ -6,18 +6,17 @@ pub mod arb;   // "The Finder" search engine
 
 
 use mev_core::{PoolUpdate, ArbitrageOpportunity, SwapStep, math::get_amount_out_cpmm};
-use std::sync::{Mutex, Arc};
+use std::sync::Arc;
 use tracing::{info, debug, error, warn};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use solana_sdk::pubkey::Pubkey;
 use anyhow::Result;
+use parking_lot::RwLock;  // Faster than std::sync::Mutex
+use smallvec::SmallVec;   // Stack-allocated vectors
 
 use crate::ports::{AIModelPort, ExecutionPort, BundleSimulator};
-
-// BundleSimulator trait is imported from ports
-
 
 pub struct StrategyEngine {
     arb_strategy: ArbitrageStrategy,
@@ -101,8 +100,8 @@ impl StrategyEngine {
 }
 
 pub struct ArbitrageStrategy {
-    graph: Mutex<DiGraph<Pubkey, PoolUpdate>>,
-    nodes: Mutex<HashMap<Pubkey, NodeIndex>>,
+    graph: RwLock<DiGraph<Pubkey, PoolUpdate>>,  // HFT: RwLock for concurrent reads
+    nodes: RwLock<HashMap<Pubkey, NodeIndex>>,   // Read-heavy workload
 }
 
 impl Default for ArbitrageStrategy {
@@ -114,37 +113,57 @@ impl Default for ArbitrageStrategy {
 impl ArbitrageStrategy {
     pub fn new() -> Self {
         Self {
-            graph: Mutex::new(DiGraph::new()),
-            nodes: Mutex::new(HashMap::new()),
+            graph: RwLock::new(DiGraph::new()),
+            nodes: RwLock::new(HashMap::new()),
         }
     }
 
     pub fn process_update(&self, update: PoolUpdate) -> Option<ArbitrageOpportunity> {
-        let mut graph = self.graph.lock().unwrap();
-        let mut nodes = self.nodes.lock().unwrap();
-
-        let node_a = *nodes.entry(update.mint_a).or_insert_with(|| graph.add_node(update.mint_a));
-        let node_b = *nodes.entry(update.mint_b).or_insert_with(|| graph.add_node(update.mint_b));
-
-        // Update or add edges in both directions (AMM pool)
-        let mut update_edge = |from, to, data: PoolUpdate| {
-            if let Some(edge) = graph.find_edge(from, to) {
-                graph[edge] = data;
-            } else {
-                graph.add_edge(from, to, data);
+        // HFT OPTIMIZATION: Minimize write-lock duration
+        
+        // 1. Fast path: Try read-only lookup first
+        let (node_a, node_b) = {
+            let nodes_read = self.nodes.read();
+            (nodes_read.get(&update.mint_a).copied(), nodes_read.get(&update.mint_b).copied())
+        };
+        
+        // 2. If nodes exist, upgrade to write for edge update
+        let (node_a, node_b) = match (node_a, node_b) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                // Write path: Need to create new nodes
+                let mut graph = self.graph.write();
+                let mut nodes = self.nodes.write();
+                
+                let a = *nodes.entry(update.mint_a).or_insert_with(|| graph.add_node(update.mint_a));
+                let b = *nodes.entry(update.mint_b).or_insert_with(|| graph.add_node(update.mint_b));
+                (a, b)
             }
         };
 
-        update_edge(node_a, node_b, update.clone());
-        update_edge(node_b, node_a, update.clone());
+        // 3. Update edges (write-lock required)
+        {
+            let mut graph = self.graph.write();
+            let update_edge = |graph: &mut DiGraph<Pubkey, PoolUpdate>, from, to, data: PoolUpdate| {
+                if let Some(edge) = graph.find_edge(from, to) {
+                    graph[edge] = data;
+                } else {
+                    graph.add_edge(from, to, data);
+                }
+            };
+            update_edge(&mut graph, node_a, node_b, update.clone());
+            update_edge(&mut graph, node_b, node_a, update.clone());
+        }
 
-        // DFS for cycles starting and ending at node_a
+        // 4. Search for cycles (read-lock only)
+        let graph = self.graph.read();
         let max_hops = 5;
         let initial_amount = 1_000_000_000u64; // 1 SOL
         let mut best_opp: Option<ArbitrageOpportunity> = None;
-        let mut visited = vec![node_a];
+        let mut visited: SmallVec<[NodeIndex; 8]> = SmallVec::new();  // Stack-allocated for common case
+        visited.push(node_a);
 
-        self.find_cycles_recursive(&graph, node_a, node_a, initial_amount, &mut visited, &mut vec![], &mut best_opp, max_hops);
+        self.find_cycles_recursive(&graph, node_a, node_a, initial_amount, &mut visited, &mut SmallVec::new(), &mut best_opp, max_hops);
         
         best_opp
     }
@@ -156,8 +175,8 @@ impl ArbitrageStrategy {
         current_node: NodeIndex,
         start_node: NodeIndex,
         current_amount: u64,
-        visited: &mut Vec<NodeIndex>,
-        current_steps: &mut Vec<SwapStep>,
+        visited: &mut SmallVec<[NodeIndex; 8]>,      // HFT: Stack-allocated
+        current_steps: &mut SmallVec<[SwapStep; 8]>, // HFT: Stack-allocated
         best_opp: &mut Option<ArbitrageOpportunity>,
         remaining_hops: u8,
     ) {
@@ -217,7 +236,7 @@ impl ArbitrageStrategy {
                     
                     if best_opp.as_ref().is_none_or(|o| profit > o.expected_profit_lamports) {
                         *best_opp = Some(ArbitrageOpportunity {
-                            steps,
+                            steps: steps.to_vec(),  // Convert SmallVec to Vec for API
                             expected_profit_lamports: profit,
                             input_amount: 1_000_000_000,
                             total_fees_bps,

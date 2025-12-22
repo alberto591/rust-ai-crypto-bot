@@ -1,5 +1,6 @@
 /// Implementation of constant product market maker (CPMM) math for Raydium V4.
 /// x * y = k
+#[inline(always)]  // HFT: Force inline for hot path
 pub fn get_amount_out_cpmm(
     amount_in: u64,
     reserve_in: u64,
@@ -20,6 +21,7 @@ pub fn get_amount_out_cpmm(
 }
 
 /// Calculates the price impact percentage (0.0 to 1.0)
+#[inline(always)]  // HFT: Force inline for hot path
 pub fn calculate_price_impact(
     amount_in: u64,
     reserve_in: u64,
@@ -29,6 +31,7 @@ pub fn calculate_price_impact(
 }
 
 /// Calculates the effective price (amount_out / amount_in)
+#[inline(always)]  // HFT: Force inline for hot path
 pub fn calculate_effective_price(
     amount_in: u64,
     amount_out: u64,
