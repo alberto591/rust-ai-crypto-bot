@@ -27,6 +27,7 @@ struct SwapBaseInData {
 
 /// All account keys required for a Raydium V4 swap
 /// Order is CRITICAL - must match Raydium program expectations exactly
+#[derive(Clone, Debug)]
 pub struct RaydiumSwapKeys {
     pub amm_id: Pubkey,
     pub amm_authority: Pubkey,
@@ -160,8 +161,8 @@ mod tests {
             serum_vault_signer: Pubkey::new_unique(),
             user_source_token_account: Pubkey::new_unique(),
             user_dest_token_account: Pubkey::new_unique(),
-            user_owner: Pubkey::new_unique(),
-            token_program: spl_token::ID,
+            user_owner: Pubkey::default(),
+            token_program: Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap(),
         };
 
         let ix = swap_base_in(&keys, 1_000_000, 950_000);

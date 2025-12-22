@@ -17,10 +17,17 @@ pub const USDC_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 /// Wrapped SOL Mint (same on all clusters)
 pub const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
+/// Raydium Token Mint (Devnet Placeholder)
+pub const RAY_MINT: &str = "3K8TuL6ymWWw3FHKFFK4f6a5d7c3x6H8G9Zq4k2oP5j"; 
+
 /// A known SOL/USDC Pool ID on Devnet
-/// If this pool is inactive, the transaction will fail with "AccountNotFound"
-/// This is expected and proves the instruction builder works
 pub const SOL_USDC_AMM_ID: &str = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2";
+
+/// Fake USDC/RAY Pool ID
+pub const USDC_RAY_AMM_ID: &str = "Run4u5d5Z4c5x6V7b8n9m0a1s2d3f4g5h6j7k8l9";
+
+/// Fake RAY/SOL Pool ID 
+pub const RAY_SOL_AMM_ID: &str = "FaKe1d2s3a4f5g6h7j8k9l0m1n2o3p4q5r6s7t8u";
 
 /// Helper to parse pubkey from const string
 pub fn parse_pubkey(s: &str) -> Pubkey {

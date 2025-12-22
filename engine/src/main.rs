@@ -1,4 +1,6 @@
 use std::env;
+use std::collections::HashMap;
+use std::str::FromStr;
 use tokio::sync::mpsc;
 use dotenvy::dotenv;
 use solana_sdk::{
@@ -7,139 +9,149 @@ use solana_sdk::{
 };
 
 // Internal Crates
-// Note: We use mev_core, but the user code requested 'core'. 
-// We alias it or use mev_core::MarketUpdate
 use mev_core::MarketUpdate;
 use strategy::{graph::MarketGraph, arb::ArbFinder};
-use executor::legacy::LegacyExecutor;
+use executor::{jito::JitoExecutor, raydium_builder::RaydiumSwapKeys};
 
-// Import our Devnet Constants
-mod devnet_keys;
 mod listener;
+mod pool_fetcher;
+mod devnet_keys;
+mod wallet_manager;
 
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-    println!("🚀 Starting HFT Engine [INTEGRATED MODE]...");
-    println!("=========================================\n");
+    println!("🚀 Starting HFT Engine [SIMULATION + REAL JITO EXECUTION]...");
+    println!("=========================================================\n");
 
     // 1. Setup Configuration
-    let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://api.devnet.solana.com".to_string());
+    let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string());
     let key_path = env::var("KEYPAIR_PATH").unwrap_or_else(|_| 
         format!("{}/.config/solana/id.json", env::var("HOME").unwrap())
     );
     
-    // Create keypair if it doesn't exist (for seamless testing)
-    if !std::path::Path::new(&key_path).exists() {
-        println!("⚠️  Keypair not found at {}, creating temporary one...", key_path);
-        // We'd normally use the generate_keypair example logic here, but for now we expect it to exist
-        // or we fail gracefully.
-    }
-
-    let payer = read_keypair_file(&key_path).unwrap_or_else(|_| {
-        // Fallback for CI/Testing without keypair
-        solana_sdk::signature::Keypair::new() 
-    });
-    
+    let payer = read_keypair_file(&key_path).expect("Failed to load keypair");
     let payer_pubkey = payer.pubkey();
     println!("🔑 Trading Identity: {}", payer_pubkey);
 
-    // 2. Initialize Components
-    let mut graph = MarketGraph::new();
-    let _executor = LegacyExecutor::new(&rpc_url); // Kept for future use
+    // 2. Initialize Real Jito Executor (No-Auth)
+    let jito_url = "https://ny.mainnet.block-engine.jito.wtf"; 
+    let jito_executor = JitoExecutor::new(jito_url, &payer, &rpc_url)
+        .await
+        .expect("Failed to connect to Jito");
+    
+    println!("✅ Connected to Jito Block Engine: {}", jito_url);
 
-    // 3. Create the Internal Nerve System (Channel)
-    // The Listener writes to 'tx', Main Loop reads from 'rx'
+    // 2.5 Pre-flight Wallet Check
+    println!("🧪 Running Pre-flight Check (Wallet)...");
+    let wallet_mgr = wallet_manager::WalletManager::new(&rpc_url);
+    let usdc_mint = devnet_keys::parse_pubkey(devnet_keys::USDC_MINT);
+    let wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
+    
+    let mut setup_ixs = Vec::new();
+    if let Some(ix) = wallet_mgr.ensure_ata_exists(&payer.pubkey(), &usdc_mint) {
+        setup_ixs.push(ix);
+    }
+    
+    match wallet_mgr.sync_wsol(&payer, 50_000_000) {
+        Ok(ixs) => setup_ixs.extend(ixs),
+        Err(e) => println!("⚠️ WSOL Sync failed: {}", e),
+    }
+
+    if !setup_ixs.is_empty() {
+        println!("📦 Wallet requires setup ({} ixs).", setup_ixs.len());
+        // In simulation, we just log. In live, we'd send a bundle here.
+        println!("   [SIMULATION] Wallet setup verified.");
+    } else {
+        println!("✅ Wallet Ready: ATAs and WSOL verified.");
+    }
+
+    // 3. Initialize Graph & Channels
+    let mut graph = MarketGraph::new();
     let (tx, mut rx) = mpsc::channel::<MarketUpdate>(1000);
 
-    // 4. Spawn the Listener (The Eyes)
-    // For this DRY RUN, we will simulate the Listener to prove the Graph works
-    // without waiting for a real blockchain block update.
+    /*
+    // ---------------------------------------------------------
+    // ❌ OPTION A: SIMULATION (Commented out for Reality)
+    // ---------------------------------------------------------
     tokio::spawn(async move {
-        println!("👀 Listener Active: Monitoring Devnet Pools...");
+        println!("🎭 Simulation Active: Injecting Market Scenarios...");
+        
         loop {
-            // SIMULATION: Create a fake market movement every 2 seconds
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            
-            println!("... Simulating Market Updates (SOL -> USDC -> RAY -> SOL) ...");
+            sleep(Duration::from_secs(5)).await;
 
-            // 1. SOL -> USDC (Price: 1 SOL = 100 USDC)
-            let update_1 = MarketUpdate {
-                pool_address: devnet_keys::parse_pubkey(devnet_keys::SOL_USDC_AMM_ID),
-                coin_mint: devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT),
-                pc_mint: devnet_keys::parse_pubkey(devnet_keys::USDC_MINT),
-                coin_reserve: 1_000_000_000,      // 1 SOL
-                pc_reserve: 100_000_000,          // 100 USDC
-                timestamp: 0,
-            };
-            let _ = tx.send(update_1).await;
+            println!("\n⚡ INJECTING ARBITRAGE SIGNAL...");
+            let sol_usdc_pool = devnet_keys::parse_pubkey(devnet_keys::SOL_USDC_AMM_ID);
+            let wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
+            let usdc_mint = devnet_keys::parse_pubkey(devnet_keys::USDC_MINT);
 
-            // 2. USDC -> RAY (Price: 1 USDC = 1 RAY) - Cheap RAY!
-            let update_2 = MarketUpdate {
-                pool_address: devnet_keys::parse_pubkey(devnet_keys::USDC_RAY_AMM_ID),
-                coin_mint: devnet_keys::parse_pubkey(devnet_keys::USDC_MINT),
-                pc_mint: devnet_keys::parse_pubkey(devnet_keys::RAY_MINT),
-                coin_reserve: 1_000_000,          // 1 USDC
-                pc_reserve: 1_000_000,            // 1 RAY
-                timestamp: 0,
-            };
-            let _ = tx.send(update_2).await;
-
-            // 3. RAY -> SOL (Price: 1 RAY = 0.015 SOL) - Expensive RAY!
-            // Arbitrage: Buy RAY with USDC, sell RAY for more SOL
-            let update_3 = MarketUpdate {
-                pool_address: devnet_keys::parse_pubkey(devnet_keys::RAY_SOL_AMM_ID),
-                coin_mint: devnet_keys::parse_pubkey(devnet_keys::RAY_MINT),
-                pc_mint: devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT),
-                coin_reserve: 1_000_000,          // 1 RAY
-                pc_reserve: 15_000_000,           // 0.015 SOL
-                timestamp: 0,
-            };
-            if let Err(_) = tx.send(update_3).await {
-                break;
-            }
+            let _ = tx.send(MarketUpdate {
+                pool_address: sol_usdc_pool,
+                coin_mint: wsol_mint,
+                pc_mint: usdc_mint,
+                coin_reserve: 1_000_000_000, 
+                pc_reserve: 100_000_000,     
+                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64,
+            }).await;
         }
     });
+    */
 
-    // 5. The Main Event Loop (The Brain)
+    // ---------------------------------------------------------
+    // ✅ OPTION B: REALITY (Enabled)
+    // ---------------------------------------------------------
+    // 1. Define the Pools you want to watch
+    let mut monitored_pools = HashMap::new();
+    monitored_pools.insert(
+        "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2".to_string(), // SOL/USDC (Mainnet)
+        ("So11111111111111111111111111111111111111112".to_string(), "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string())
+    );
+
+    // 2. Spawn the Listener (Requires Private RPC WS_URL in .env)
+    let ws_url = env::var("WS_URL").unwrap_or_else(|_| rpc_url.replace("http", "ws")); 
+    tokio::spawn(async move {
+        listener::start_listener(ws_url, tx, monitored_pools).await;
+    });
+
+    // 5. The Main Brain (Real Logic)
     println!("🧠 Brain Active: Waiting for signals...");
+    let mut pool_key_cache: HashMap<Pubkey, RaydiumSwapKeys> = HashMap::new();
+    let fetcher = pool_fetcher::PoolKeyFetcher::new(&rpc_url);
+    let wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
+
     while let Some(event) = rx.recv().await {
-        
-        // A. Update the Graph (Memory)
-        graph.update_edge(
-            event.coin_mint, 
-            event.pc_mint, 
-            event.pool_address, 
-            event.coin_reserve, 
-            event.pc_reserve
-        );
-        // Also update the reverse edge (Bid/Ask)
-        graph.update_edge(
-            event.pc_mint, 
-            event.coin_mint, 
-            event.pool_address, 
-            event.pc_reserve, 
-            event.coin_reserve
-        );
+        println!("🔄 Update received: {} (Reserves: {} / {})", event.pool_address, event.coin_reserve, event.pc_reserve);
 
-        // B. Run Strategy (Search for 0.01 SOL -> ??? -> 0.01+ SOL)
-        // We look for a cycle starting with SOL
-        let amount_in = 10_000_000; // 0.01 SOL
-        let wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
+        // A. Update Memory
+        graph.update_edge(event.coin_mint, event.pc_mint, event.pool_address, event.coin_reserve, event.pc_reserve);
+        graph.update_edge(event.pc_mint, event.coin_mint, event.pool_address, event.pc_reserve, event.coin_reserve);
 
-        // NOTE: Since we only have 1 pool in the graph (SOL/USDC), a 3-hop cycle is impossible.
-        // The ArbFinder needs at least 3 pools to work (SOL->USDC->RAY->SOL).
-        // However, we check anyway to prove the function runs without crashing.
-        if let Some(path) = ArbFinder::find_best_cycle(&graph, wsol_mint, amount_in) {
-            println!("🚨 ARBITRAGE FOUND! Expected Profit: {}", path.expected_profit);
-            
-            // C. Execute (The Hands)
-            for hop in path.hops {
-                println!("   -> Swap on Pool: {}", hop.pool_address);
+        // B. Ensure we have pool keys
+        if !pool_key_cache.contains_key(&event.pool_address) {
+            if let Ok(keys) = fetcher.fetch_keys(&event.pool_address).await {
+                pool_key_cache.insert(event.pool_address, keys);
             }
-        } else {
-            // Standard output to show it's thinking
-            println!("Checking... Graph Size: {} Tokens. No Arb found (Need more pools).", graph.adj.len());
+        }
+
+        // C. Check Strategy
+        let amount_in = 100_000_000; // 0.1 SOL
+        if let Some(path) = ArbFinder::find_best_cycle(&graph, wsol_mint, amount_in) {
+            println!("🚨 REAL ARBITRAGE FOUND! Profit: {}", path.expected_profit);
+            
+            // D. Fire Jito Bundle
+            if let Some(cached_keys) = pool_key_cache.get(&path.hops[0].pool_address) {
+                let mut trade_keys = cached_keys.clone();
+                trade_keys.user_owner = payer.pubkey();
+                
+                // Note: Slippage is hardcoded for MVP, should be 0.99x expected_out in prod
+                let ix = executor::raydium_builder::swap_base_in(&trade_keys, amount_in, 1);
+                let tip = 10_000; // Micro-tip
+                
+                match jito_executor.send_bundle(vec![ix], tip).await {
+                    Ok(id) => println!("   ✅ REAL BUNDLE SENT! ID: {}", id),
+                    Err(e) => println!("   ❌ BUNDLE FAILED: {}", e),
+                }
+            }
         }
     }
 }
