@@ -20,9 +20,16 @@ pub async fn start_listener(
     tx: Sender<MarketUpdate>,
     monitored_pools: HashMap<String, (String, String)> // Pool Addr -> (Coin, Pc)
 ) {
-    println!("📡 Connecting to Solana WebSocket: {}", ws_url);
+    tracing::info!("📡 Connecting to Solana WebSocket: {}", ws_url);
     
-    let (ws_stream, _) = connect_async(ws_url).await.expect("Failed to connect");
+    let (ws_stream, _) = match connect_async(&ws_url).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("❌ WebSocket Connection Failed: {}", e);
+            return;
+        }
+    };
+    
     let (mut write, mut read) = ws_stream.split();
 
     // 1. Subscribe to the specific Raydium Pool Accounts
@@ -48,10 +55,13 @@ pub async fn start_listener(
                 }
             ]
         });
-        write.send(Message::Text(subscribe_msg.to_string().into())).await.unwrap();
+        if let Err(e) = write.send(Message::Text(subscribe_msg.to_string().into())).await {
+            tracing::error!("❌ Subscription send failed: {}", e);
+            return;
+        }
     }
 
-    println!("👂 Listening for price updates...");
+    tracing::info!("👂 Listener ACTIVE ({} pools).", monitored_pools.len());
 
     // 2. Process Incoming Messages
     while let Some(msg) = read.next().await {
@@ -63,8 +73,8 @@ pub async fn start_listener(
                         if let Some(pool_addr) = pending_subs.get(&(id_val as i32)) {
                             if let Some(sub_id) = json.get("result").and_then(|v| v.as_u64()) {
                                 sub_to_pool.insert(sub_id, pool_addr.clone());
-                                println!("✅ Subscribed to pool: {} (SubID: {})", pool_addr, sub_id);
-                            }
+                                tracing::info!("✅ Subscribed: {} (ID: {})", pool_addr, sub_id);
+                             }
                         }
                         continue;
                     }
@@ -76,10 +86,9 @@ pub async fn start_listener(
                             if let Some(result) = params.get("result") {
                                 if let Some(value) = result.get("value") {
                                     if let Some(data_arr) = value.get("data").and_then(|d| d.as_array()) {
-                                        if let Some(update_str) = data_arr.first().and_then(|v| v.as_str()) { // Changed base64_str to update_str and used first()
-                                            // Use modern base64 API
+                                        if let Some(update_str) = data_arr.first().and_then(|v| v.as_str()) {
                                             use base64::{Engine as _, engine::general_purpose};
-                                            if let Ok(bytes) = general_purpose::STANDARD.decode(update_str) { // Used update_str here
+                                            if let Ok(bytes) = general_purpose::STANDARD.decode(update_str) {
                                                 if bytes.len() >= std::mem::size_of::<mev_core::raydium::AmmInfo>() {
                                                     let amm_info: &mev_core::raydium::AmmInfo = unsafe {
                                                         &*(bytes.as_ptr() as *const mev_core::raydium::AmmInfo)
@@ -100,7 +109,9 @@ pub async fn start_listener(
                                                         timestamp: ts,
                                                     };
                                                     
+                                                    // If receiver dropped, stop loop
                                                     if tx.send(update).await.is_err() {
+                                                        tracing::warn!("🔌 Core loop dropped. Stopping listener.");
                                                         break; 
                                                     }
                                                 }
@@ -117,7 +128,7 @@ pub async fn start_listener(
                 let _ = write.send(Message::Pong(payload)).await;
             }
             Ok(Message::Close(_)) | Err(_) => {
-                println!("📡 WebSocket Closed by server or error.");
+                tracing::warn!("📡 WebSocket Connection DISRUPTED.");
                 break;
             }
             _ => {}

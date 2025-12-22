@@ -10,7 +10,7 @@ use spl_associated_token_account::get_associated_token_address;
 use solana_client::rpc_client::RpcClient;
 use std::error::Error;
 
-pub struct WalletManager {
+pub(crate) struct WalletManager {
     rpc: RpcClient,
 }
 

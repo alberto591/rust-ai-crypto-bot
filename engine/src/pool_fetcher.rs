@@ -7,7 +7,7 @@ use std::str::FromStr;
 use mev_core::raydium::AmmInfo; 
 use executor::raydium_builder::RaydiumSwapKeys;
 
-pub struct PoolKeyFetcher {
+pub(crate) struct PoolKeyFetcher {
     rpc: RpcClient,
 }
 
@@ -19,7 +19,7 @@ impl PoolKeyFetcher {
     }
 
     pub async fn fetch_keys(&self, pool_id: &Pubkey) -> Result<RaydiumSwapKeys, Box<dyn Error>> {
-        println!("🔍 Fetching full keys for Pool: {}", pool_id);
+        tracing::debug!("🔍 Fetching keys for Pool: {}", pool_id);
 
         // 1. Fetch Raw Account Data from Solana
         let account = self.rpc.get_account(pool_id)?;
