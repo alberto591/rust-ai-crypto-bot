@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use config::{Config, ConfigError, Environment, File};
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct BotConfig {
     pub r#rpc_url: String,
@@ -14,6 +15,7 @@ pub struct BotConfig {
 }
 
 impl BotConfig {
+    #[allow(dead_code)]
     pub fn new() -> Result<Self, ConfigError> {
         let s = Config::builder()
             // Start with default values or a local config file if it exists

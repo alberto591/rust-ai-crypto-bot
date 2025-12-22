@@ -68,6 +68,7 @@ impl WalletManager {
         Ok(instructions)
     }
 
+    #[allow(dead_code)]
     /// Unwraps WSOL back to native SOL
     pub fn unwrap_wsol(&self, payer: &Pubkey) -> Result<Instruction, Box<dyn Error>> {
         let wsol_mint = spl_token::native_mint::id();

@@ -15,7 +15,6 @@ use solana_sdk::pubkey::Pubkey;
 use anyhow::Result;
 
 use crate::ports::{AIModelPort, ExecutionPort, BundleSimulator};
-use solana_sdk::instruction::Instruction;
 
 // BundleSimulator trait is imported from ports
 
@@ -72,7 +71,7 @@ impl StrategyEngine {
                     };
 
                     if let Some(simulator) = &self.simulator {
-                        match simulator.simulate_bundle(&instructions, &executor.pubkey()).await {
+                        match simulator.simulate_bundle(&instructions, executor.pubkey()).await {
                             Ok(units) => info!("Simulation SUCCEEDED: {} units consumed.", units),
                             Err(e) => {
                                 warn!("Simulation FAILED: {}. DROPPING trade.", e);
@@ -116,6 +115,12 @@ pub struct ArbitrageStrategy {
     nodes: Mutex<HashMap<Pubkey, NodeIndex>>,
 }
 
+impl Default for ArbitrageStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ArbitrageStrategy {
     pub fn new() -> Self {
         Self {
@@ -154,6 +159,7 @@ impl ArbitrageStrategy {
         best_opp
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn find_cycles_recursive(
         &self,
         graph: &DiGraph<Pubkey, PoolUpdate>,
@@ -219,7 +225,7 @@ impl ArbitrageStrategy {
                     let mut steps = current_steps.clone();
                     steps.push(step);
                     
-                    if best_opp.as_ref().map_or(true, |o| profit > o.expected_profit_lamports) {
+                    if best_opp.as_ref().is_none_or(|o| profit > o.expected_profit_lamports) {
                         *best_opp = Some(ArbitrageOpportunity {
                             steps,
                             expected_profit_lamports: profit,

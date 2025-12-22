@@ -8,7 +8,6 @@ use solana_sdk::{
 use solana_client::rpc_client::RpcClient;
 use jito_protos::searcher::{
     searcher_service_client::SearcherServiceClient, 
-    SendBundleRequest // Kept for traits/types if needed
 };
 use jito_searcher_client::{get_searcher_client_no_auth, send_bundle_no_wait};
 use tonic::transport::Channel;

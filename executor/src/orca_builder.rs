@@ -2,7 +2,6 @@
 ///
 /// Orca Whirlpools use concentrated liquidity (CLMM) which is more complex than
 /// traditional AMMs. This module provides a simplified swap builder.
-
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
@@ -11,6 +10,9 @@ use spl_token;
 
 /// Orca Whirlpool Program ID
 pub const ORCA_WHIRLPOOL_PROGRAM: &str = "whirLbMiqkh6thXv7uBToywS9Bn1McGQ669YUsbAHQi";
+
+/// Swap instruction discriminator for Orca Whirlpool
+const WHIRLPOOL_SWAP_INSTRUCTION: &[u8] = &[0xf8, 0xc6, 0x9e, 0x91, 0xe1, 0x75, 0x87, 0xc8]; 
 
 /// Whirlpool pool configuration
 #[derive(Debug, Clone)]
@@ -35,9 +37,15 @@ pub struct WhirlpoolKeys {
     pub oracle: Pubkey,
 }
 
-/// Swap instruction discriminator for Orca Whirlpool
-/// Note: This is a placeholder - actual discriminator should be verified from Orca docs
-const WHIRLPOOL_SWAP_INSTRUCTION: &[u8] = &[0xf8, 0xc6, 0x9e, 0x91, 0xe1, 0x75, 0x87, 0xc8]; // Anchor discriminator for "swap"
+/// Whirlpool swap parameters
+#[derive(Debug, Clone)]
+pub struct WhirlpoolSwapParams {
+    pub amount: u64,
+    pub other_amount_threshold: u64,
+    pub sqrt_price_limit: u128,
+    pub amount_specified_is_input: bool,
+    pub a_to_b: bool,
+}
 
 /// Build an Orca Whirlpool swap instruction
 ///
@@ -46,11 +54,7 @@ const WHIRLPOOL_SWAP_INSTRUCTION: &[u8] = &[0xf8, 0xc6, 0x9e, 0x91, 0xe1, 0x75, 
 /// * `user_token_a` - User's token A account
 /// * `user_token_b` - User's token B account
 /// * `user_authority` - Owner/signer
-/// * `amount` - Amount to swap
-/// * `other_amount_threshold` - Minimum output (slippage protection)
-/// * `sqrt_price_limit` - Price limit (u128, pass u128::MAX for no limit)
-/// * `amount_specified_is_input` - True if `amount` is input, false if output
-/// * `a_to_b` - True for A→B swap, false for B→A
+/// * `params` - Swap parameters (amounts, limits, flags)
 ///
 /// # Returns
 /// Whirlpool swap instruction
@@ -59,21 +63,17 @@ pub fn build_whirlpool_swap(
     user_token_a: Pubkey,
     user_token_b: Pubkey,
     user_authority: Pubkey,
-    amount: u64,
-    other_amount_threshold: u64,
-    sqrt_price_limit: u128,
-    amount_specified_is_input: bool,
-    a_to_b: bool,
+    params: WhirlpoolSwapParams,
 ) -> Instruction {
     // Encode instruction data
     // Format: discriminator (8 bytes) + amount (8) + other_amount_threshold (8) + sqrt_price_limit (16) + flags (2 bools)
     let mut data = Vec::with_capacity(42);
     data.extend_from_slice(WHIRLPOOL_SWAP_INSTRUCTION); // 8 bytes
-    data.extend_from_slice(&amount.to_le_bytes());      // 8 bytes
-    data.extend_from_slice(&other_amount_threshold.to_le_bytes()); // 8 bytes
-    data.extend_from_slice(&sqrt_price_limit.to_le_bytes()); // 16 bytes
-    data.push(amount_specified_is_input as u8);         // 1 byte
-    data.push(a_to_b as u8);                             // 1 byte
+    data.extend_from_slice(&params.amount.to_le_bytes());      // 8 bytes
+    data.extend_from_slice(&params.other_amount_threshold.to_le_bytes()); // 8 bytes
+    data.extend_from_slice(&params.sqrt_price_limit.to_le_bytes()); // 16 bytes
+    data.push(params.amount_specified_is_input as u8);         // 1 byte
+    data.push(params.a_to_b as u8);                             // 1 byte
 
     // Account ordering for Whirlpool swap
     let accounts = vec![
@@ -130,11 +130,13 @@ pub fn build_simple_whirlpool_swap(
         user_token_a,
         user_token_b,
         user_authority,
-        amount_in,
-        min_amount_out,
-        u128::MAX, // No price limit
-        true,      // Amount specified is input
-        a_to_b,
+        WhirlpoolSwapParams {
+            amount: amount_in,
+            other_amount_threshold: min_amount_out,
+            sqrt_price_limit: u128::MAX, // No price limit
+            amount_specified_is_input: true,
+            a_to_b,
+        },
     )
 }
 

@@ -1,6 +1,5 @@
 use std::env;
 use std::collections::HashMap;
-use std::str::FromStr;
 use tokio::sync::mpsc;
 use dotenvy::dotenv;
 use solana_sdk::{
@@ -26,7 +25,10 @@ async fn main() {
     println!("=========================================================\n");
 
     // 1. Setup Configuration
-    let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string());
+    let config = config::BotConfig::new().expect("Failed to load config");
+    println!("✅ Config Loaded: RPC={}, WS={}", config.rpc_url, config.ws_url);
+    
+    let rpc_url = config.rpc_url;
     let key_path = env::var("KEYPAIR_PATH").unwrap_or_else(|_| 
         format!("{}/.config/solana/id.json", env::var("HOME").unwrap())
     );
@@ -47,7 +49,7 @@ async fn main() {
     println!("🧪 Running Pre-flight Check (Wallet)...");
     let wallet_mgr = wallet_manager::WalletManager::new(&rpc_url);
     let usdc_mint = devnet_keys::parse_pubkey(devnet_keys::USDC_MINT);
-    let wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
+    let _wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
     
     let mut setup_ixs = Vec::new();
     if let Some(ix) = wallet_mgr.ensure_ata_exists(&payer.pubkey(), &usdc_mint) {
@@ -114,8 +116,12 @@ async fn main() {
         listener::start_listener(ws_url, tx, monitored_pools).await;
     });
 
-    // 5. The Main Brain (Real Logic)
-    println!("🧠 Brain Active: Waiting for signals...");
+    // 4. Ignition
+    println!("🔥 Ignition: Engine Running. Listening for Raydium events...");
+    
+    // Safety check for mints
+    let _ = devnet_keys::get_devnet_mints();
+    
     let mut pool_key_cache: HashMap<Pubkey, RaydiumSwapKeys> = HashMap::new();
     let fetcher = pool_fetcher::PoolKeyFetcher::new(&rpc_url);
     let wsol_mint = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
@@ -128,9 +134,9 @@ async fn main() {
         graph.update_edge(event.pc_mint, event.coin_mint, event.pool_address, event.pc_reserve, event.coin_reserve);
 
         // B. Ensure we have pool keys
-        if !pool_key_cache.contains_key(&event.pool_address) {
+        if let std::collections::hash_map::Entry::Vacant(e) = pool_key_cache.entry(event.pool_address) {
             if let Ok(keys) = fetcher.fetch_keys(&event.pool_address).await {
-                pool_key_cache.insert(event.pool_address, keys);
+                e.insert(keys);
             }
         }
 

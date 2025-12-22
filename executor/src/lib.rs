@@ -20,8 +20,8 @@ use solana_sdk::message::v0::Message;
 use solana_sdk::pubkey::Pubkey;
 use tonic::codegen::InterceptedService;
 use tonic::transport::Channel;
-use tracing::{info, error, debug};
-use mev_core::{ArbitrageOpportunity, SwapStep, constants::JITO_TIP_PROGRAM};
+use tracing::{info, debug};
+use mev_core::{ArbitrageOpportunity, SwapStep};
 
 pub type SearcherClient = SearcherServiceClient<InterceptedService<Channel, ClientInterceptor>>;
 

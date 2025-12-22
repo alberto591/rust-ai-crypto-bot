@@ -1,10 +1,10 @@
+#![allow(dead_code)]
 /// Devnet Pool Keys and Constants
 /// 
 /// These are standard Raydium V4 addresses on Solana Devnet.
 /// Note: Devnet pools can be unstable - if a pool becomes inactive,
 /// transactions will fail with "AccountNotFound" (which still proves
 /// the instruction builder works).
-
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 

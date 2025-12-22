@@ -1,7 +1,7 @@
 use futures_util::{StreamExt, SinkExt};
 use tokio::sync::mpsc::Sender;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use serde_json::{json, Value};
+use serde_json::{json, Value}; // This line was intended to be kept, the provided snippet was malformed.
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use mev_core::MarketUpdate; 
@@ -76,10 +76,10 @@ pub async fn start_listener(
                             if let Some(result) = params.get("result") {
                                 if let Some(value) = result.get("value") {
                                     if let Some(data_arr) = value.get("data").and_then(|d| d.as_array()) {
-                                        if let Some(base64_str) = data_arr.get(0).and_then(|s| s.as_str()) {
+                                        if let Some(update_str) = data_arr.first().and_then(|v| v.as_str()) { // Changed base64_str to update_str and used first()
                                             // Use modern base64 API
                                             use base64::{Engine as _, engine::general_purpose};
-                                            if let Ok(bytes) = general_purpose::STANDARD.decode(base64_str) {
+                                            if let Ok(bytes) = general_purpose::STANDARD.decode(update_str) { // Used update_str here
                                                 if bytes.len() >= std::mem::size_of::<mev_core::raydium::AmmInfo>() {
                                                     let amm_info: &mev_core::raydium::AmmInfo = unsafe {
                                                         &*(bytes.as_ptr() as *const mev_core::raydium::AmmInfo)
@@ -100,7 +100,7 @@ pub async fn start_listener(
                                                         timestamp: ts,
                                                     };
                                                     
-                                                    if let Err(_) = tx.send(update).await {
+                                                    if tx.send(update).await.is_err() {
                                                         break; 
                                                     }
                                                 }

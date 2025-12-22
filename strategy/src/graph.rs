@@ -7,7 +7,6 @@
 /// - O(1) Adjacency Lookups via HashMap
 /// - Local reserve tracking for zero-RPC price calculation
 /// - Allocation-optimized for rapid updates
-
 use std::collections::HashMap;
 use solana_sdk::pubkey::Pubkey;
 
@@ -28,6 +27,12 @@ pub struct MarketGraph {
     pub adj: HashMap<Pubkey, Vec<Edge>>,
 }
 
+impl Default for MarketGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MarketGraph {
     pub fn new() -> Self {
         Self {
@@ -44,15 +49,15 @@ impl MarketGraph {
         reserve_from: u64,
         reserve_to: u64,
     ) {
-        let entry = self.adj.entry(from).or_insert(Vec::new());
+        let edges = self.adj.entry(from).or_default();
         
         // Check if edge exists to update it (Fast Scan)
-        if let Some(edge) = entry.iter_mut().find(|e| e.pool_address == pool) {
+        if let Some(edge) = edges.iter_mut().find(|e| e.pool_address == pool) {
             edge.reserve_in = reserve_from as u128;
             edge.reserve_out = reserve_to as u128;
         } else {
             // New connection discovered
-            entry.push(Edge {
+            edges.push(Edge {
                 to_token: to,
                 pool_address: pool,
                 fee_numerator: 25, // Default Raydium 0.25%
