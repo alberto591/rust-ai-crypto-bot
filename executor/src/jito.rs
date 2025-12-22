@@ -11,16 +11,19 @@ use jito_protos::searcher::{
     // SubscribeBundleResultsRequest, // Unused for now
     // SendBundleRequest // Unused import in user code sample, checking usage
 };
-use jito_searcher_client::{get_searcher_client, send_bundle_no_wait};
+use jito_searcher_client::{get_searcher_client_auth, send_bundle_no_wait};
 use tonic::transport::Channel;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::error::Error;
 use std::str::FromStr;
 
+use jito_searcher_client::token_authenticator::ClientInterceptor;
+use tonic::codegen::InterceptedService;
+
 pub struct JitoExecutor {
     // The gRPC client must be protected by a Mutex for async sharing
-    client: Arc<Mutex<SearcherServiceClient<Channel>>>,
+    client: Arc<Mutex<SearcherServiceClient<InterceptedService<Channel, ClientInterceptor>>>>,
     auth_keypair: Arc<Keypair>,
     rpc_client: Arc<RpcClient>,
     tip_accounts: Vec<Pubkey>,
@@ -38,7 +41,7 @@ impl JitoExecutor {
         
         // 1. CONNECT & AUTH (The "Issue" you had is solved here automatically)
         // get_searcher_client performs the Challenge-Response handshake.
-        let client = get_searcher_client(block_engine_url, &auth_arc).await?;
+        let client = get_searcher_client_auth(block_engine_url, &auth_arc).await?;
         
         let rpc = RpcClient::new(rpc_url.to_string());
 
@@ -100,7 +103,7 @@ impl JitoExecutor {
 
         // 4. FIRE (Send to Block Engine)
         // send_bundle_no_wait is faster than waiting for response
-        send_bundle_no_wait(&mut client, &bundles).await?;
+        send_bundle_no_wait(&bundles, &mut client).await?;
 
         Ok("Bundle Sent".to_string())
     }

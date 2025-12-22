@@ -15,6 +15,7 @@ use executor::legacy::LegacyExecutor;
 
 // Import our Devnet Constants
 mod devnet_keys;
+mod listener;
 
 #[tokio::main]
 async fn main() {
@@ -59,19 +60,42 @@ async fn main() {
         loop {
             // SIMULATION: Create a fake market movement every 2 seconds
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            
+            println!("... Simulating Market Updates (SOL -> USDC -> RAY -> SOL) ...");
 
-            let update = MarketUpdate {
+            // 1. SOL -> USDC (Price: 1 SOL = 100 USDC)
+            let update_1 = MarketUpdate {
                 pool_address: devnet_keys::parse_pubkey(devnet_keys::SOL_USDC_AMM_ID),
-                coin_mint: devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT), // SOL
-                pc_mint: devnet_keys::parse_pubkey(devnet_keys::USDC_MINT),   // USDC
-                // MOCK DATA: Price fluctuates slightly
-                coin_reserve: 1_000_000_000,       // 1 SOL
-                pc_reserve: 200_000_000 + (rand::random::<u64>() % 1000), // ~200 USDC + Noise
+                coin_mint: devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT),
+                pc_mint: devnet_keys::parse_pubkey(devnet_keys::USDC_MINT),
+                coin_reserve: 1_000_000_000,      // 1 SOL
+                pc_reserve: 100_000_000,          // 100 USDC
                 timestamp: 0,
             };
-            
-            // Send to Main Brain
-            if let Err(_) = tx.send(update).await {
+            let _ = tx.send(update_1).await;
+
+            // 2. USDC -> RAY (Price: 1 USDC = 1 RAY) - Cheap RAY!
+            let update_2 = MarketUpdate {
+                pool_address: devnet_keys::parse_pubkey(devnet_keys::USDC_RAY_AMM_ID),
+                coin_mint: devnet_keys::parse_pubkey(devnet_keys::USDC_MINT),
+                pc_mint: devnet_keys::parse_pubkey(devnet_keys::RAY_MINT),
+                coin_reserve: 1_000_000,          // 1 USDC
+                pc_reserve: 1_000_000,            // 1 RAY
+                timestamp: 0,
+            };
+            let _ = tx.send(update_2).await;
+
+            // 3. RAY -> SOL (Price: 1 RAY = 0.015 SOL) - Expensive RAY!
+            // Arbitrage: Buy RAY with USDC, sell RAY for more SOL
+            let update_3 = MarketUpdate {
+                pool_address: devnet_keys::parse_pubkey(devnet_keys::RAY_SOL_AMM_ID),
+                coin_mint: devnet_keys::parse_pubkey(devnet_keys::RAY_MINT),
+                pc_mint: devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT),
+                coin_reserve: 1_000_000,          // 1 RAY
+                pc_reserve: 15_000_000,           // 0.015 SOL
+                timestamp: 0,
+            };
+            if let Err(_) = tx.send(update_3).await {
                 break;
             }
         }

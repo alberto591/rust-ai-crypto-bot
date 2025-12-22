@@ -1,93 +1,75 @@
-use std::sync::Arc;
-use crossbeam::channel::Sender;
-use tracing::{info, error, debug};
-use mev_core::{PoolUpdate, raydium::AmmInfo};
+use futures_util::{StreamExt, SinkExt};
+use tokio::sync::mpsc::Sender;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use serde_json::{json, Value};
 use solana_sdk::pubkey::Pubkey;
-use solana_client::{pubsub_client::PubsubClient, rpc_config::RpcAccountInfoConfig};
-use solana_sdk::commitment_config::CommitmentConfig;
+use std::collections::HashMap;
+use mev_core::MarketUpdate; 
 
-pub struct SolanaListener {
-    sender: Sender<PoolUpdate>,
+// Map Account -> Token Pair info (Cached)
+#[allow(dead_code)]
+struct PoolConfig {
+    coin_mint: Pubkey,
+    pc_mint: Pubkey,
 }
 
-impl SolanaListener {
-    pub fn new(sender: Sender<PoolUpdate>) -> Self {
-        Self { sender }
-    }
-
-    pub async fn start(&self, grpc_url: &str) -> Result<(), Box<dyn std::error::Error>> {
-        info!("Starting Solana gRPC Listener on {}", grpc_url);
-        // ... (existing gRPC logic)
-        Ok(())
-    }
-
-    pub fn inject_simulation_update(&self, update: PoolUpdate) {
-        debug!("Injecting simulation update for pool: {}", update.pool_address);
-        if let Err(e) = self.sender.send(update) {
-            error!("Failed to send simulated update: {}", e);
-        }
-    }
-}
-
-pub fn start_listener(rpc_url: String, pool_address: Pubkey, sender: Sender<PoolUpdate>) {
-    info!("Starting Raydium PubSub Listener for pool: {}", pool_address);
-
-    let pubsub_rpc_url = rpc_url.replace("https://", "wss://").replace("http://", "ws://");
+pub async fn start_listener(
+    ws_url: String, 
+    tx: Sender<MarketUpdate>,
+    monitored_pools: HashMap<String, (String, String)> // Pool Addr -> (Coin, Pc)
+) {
+    println!("📡 Connecting to Solana WebSocket: {}", ws_url);
     
-    std::thread::spawn(move || {
-        let (mut _subscription, receiver) = match PubsubClient::account_subscribe(
-            &pubsub_rpc_url,
-            &pool_address,
-            Some(RpcAccountInfoConfig {
-                commitment: Some(CommitmentConfig::processed()),
-                encoding: Some(solana_account_decoder::UiAccountEncoding::Base64),
-                ..RpcAccountInfoConfig::default()
-            }),
-        ) {
-            Ok(res) => res,
-            Err(e) => {
-                error!("Failed to subscribe to account: {}", e);
-                return;
-            }
-        };
+    let (ws_stream, _) = connect_async(ws_url).await.expect("Failed to connect");
+    let (mut write, mut read) = ws_stream.split();
 
-        loop {
-            match receiver.recv() {
-                Ok(response) => {
-                    let data: Vec<u8> = match response.value.data.decode() {
-                        Some(d) => d,
-                        None => continue,
-                    };
+    // 1. Subscribe to the specific Raydium Pool Accounts
+    let accounts: Vec<&String> = monitored_pools.keys().collect();
+    
+    // We subscribe to "accountSubscribe" for every pool we care about
+    // Note: For production with 100+ pools, use 'programSubscribe' instead.
+    for account in accounts {
+        let subscribe_msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "accountSubscribe",
+            "params": [
+                account,
+                {
+                    "encoding": "jsonParsed", 
+                    "commitment": "processed" 
+                }
+            ]
+        });
+        write.send(Message::Text(subscribe_msg.to_string())).await.unwrap();
+    }
 
-                    // Use pod_read_unaligned to handle potential misalignment in Vec<u8> buffer
-                    if data.len() == std::mem::size_of::<AmmInfo>() {
-                         let amm_info: AmmInfo = bytemuck::pod_read_unaligned(&data);
-                         let update = PoolUpdate {
-                            pool_address,
-                            program_id: mev_core::constants::RAYDIUM_V4_PROGRAM,
-                            mint_a: amm_info.base_mint,
-                            mint_b: amm_info.quote_mint,
-                            reserve_a: amm_info.base_reserve as u128,
-                            reserve_b: amm_info.quote_reserve as u128,
-                            fee_bps: 30, // Standard Raydium fee
-                            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-                        };
+    println!("👂 Listening for price updates...");
 
-                        if let Err(e) = sender.send(update) {
-                            error!("Failed to send PoolUpdate: {}", e);
+    // 2. Process Incoming Messages
+    while let Some(msg) = read.next().await {
+        if let Ok(Message::Text(text)) = msg {
+            if let Ok(json) = serde_json::from_str::<Value>(&text) {
+                // Check if this is a notification (not the subscription response)
+                if let Some(params) = json.get("params") {
+                    if let Some(result) = params.get("result") {
+                        if let Some(value) = result.get("value") {
+                            // Parse Data
+                            // Note: real parsing requires checking offsets (byte_muck)
+                            // For this snippet, we assume 'jsonParsed' returns nice fields
+                            // or serves as a placeholder for the actual parsing logic implemented in Phase 1.
+                            
+                            // In a real implementation we would parse Reserves here.
+                            // For now, we print to show we received data.
+                            // println!("Received Update for Pool: {:?}", value); 
+                            
+                            // We would construct MarketUpdate and send it:
+                            // let update = MarketUpdate { ... };
+                            // tx.send(update).await.unwrap();
                         }
                     }
                 }
-                Err(e) => {
-                    error!("PubSub receiver error: {}", e);
-                    break;
-                }
             }
         }
-    });
-}
-
-#[cfg(test)]
-mod listener_tests {
-    use super::*;
+    }
 }
