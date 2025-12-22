@@ -1,6 +1,8 @@
 pub mod ports;
 pub mod adapters;
 pub mod graph; // "The Brain" market graph
+pub mod arb;   // "The Finder" search engine
+
 
 
 use mev_core::{PoolUpdate, ArbitrageOpportunity, SwapStep, math::get_amount_out_cpmm};
