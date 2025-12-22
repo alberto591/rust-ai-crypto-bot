@@ -85,3 +85,7 @@ mod tests {
         assert_eq!(config.monitored_pool_addresses, "pool1,pool2");
     }
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod config_tests;

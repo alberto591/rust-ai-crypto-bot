@@ -3,7 +3,8 @@
 /// This is a minimal test to verify the Raydium instruction builder works
 /// by executing a real swap on Solana Devnet.
 
-use executor::{legacy::LegacyExecutor, raydium_builder::{RaydiumSwapKeys, swap_base_in}};
+use executor::{legacy::LegacyExecutor, raydium_builder::swap_base_in};
+use mev_core::raydium::RaydiumSwapKeys;
 use solana_sdk::{
     signature::{Keypair, read_keypair_file},
     signer::Signer,
