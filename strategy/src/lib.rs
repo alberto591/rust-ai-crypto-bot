@@ -1,5 +1,7 @@
 pub mod ports;
 pub mod adapters;
+pub mod graph; // "The Brain" market graph
+
 
 use mev_core::{PoolUpdate, ArbitrageOpportunity, SwapStep, math::get_amount_out_cpmm};
 use std::sync::{Mutex, Arc};
