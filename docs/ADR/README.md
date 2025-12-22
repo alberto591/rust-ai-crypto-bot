@@ -16,6 +16,10 @@ This directory contains all architectural decisions made for the Solana MEV Arbi
 | [ADR-008](./ADR-008-port-abstractions-dependency-inversion.md) | Port Abstractions for Dependency Inversion | Accepted | 2025-12-22 |
 | [ADR-009](./ADR-009-simulation-mode-testing.md) | Simulation Mode for Testing | Accepted | 2025-12-22 |
 | [ADR-010](./ADR-010-tui-dashboard-design.md) | TUI Dashboard Design | Accepted | 2025-12-22 |
+| [ADR-011](./ADR-011-automated-wallet-asset-management.md) | Automated Wallet & Asset Management | Accepted | 2025-12-22 |
+| [ADR-012](./ADR-012-real-time-websocket-market-listener.md) | Real-time WebSocket Market Listener | Accepted | 2025-12-22 |
+| [ADR-013](./ADR-013-lazy-pool-key-fetching-and-caching.md) | Lazy Pool Key Fetching & Caching | Accepted | 2025-12-22 |
+| [ADR-014](./ADR-014-comprehensive-unit-testing-strategy.md) | Comprehensive Unit Testing Strategy | Accepted | 2025-12-22 |
 
 ## ADR Process
 
@@ -84,3 +88,9 @@ Create an ADR when making decisions about:
 - ADR-005: Jito Bundle Execution
 - ADR-009: Simulation Mode for Testing
 - ADR-010: TUI Dashboard Design
+
+### Engine & Logistics
+- ADR-011: Automated Wallet & Asset Management
+- ADR-012: Real-time WebSocket Market Listener
+- ADR-013: Lazy Pool Key Fetching & Caching
+- ADR-014: Comprehensive Unit Testing Strategy
