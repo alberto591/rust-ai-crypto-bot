@@ -31,13 +31,15 @@ The project has successfully moved from initial scaffolding to a sophisticated, 
 
 ---
 
-## 🛡️ Phases 4-7: Operational Resilience & Hardening (Completed)
+## 🛡️ Phases 4-7: Operational Resilience & Hardening (Completed & Integrated)
 **Focus:** Reliability, Multi-Hop pathfinding, and Quality Assurance.
 - **Jito Soft-Fail:** Implemented logic to allow data harvesting and simulation even if Jito credentials are pending.
-- **Arbitrage v2:** Upgraded pathfinding from 3-token triangles to **Recursive 5-Hop DFS**, significantly expanding the search space.
-- **Slippage & Price Impact:** Added proactive math to `core` to reject trades with > 1.0% price impact, protecting capital.
-- **Comprehensive Testing:** Added unit and integration tests across `core` and `strategy` to verify math and cycle detection.
-- **Technical Documentation:** Created detailed guides for [Strategy](docs/STRATEGY.md) and [Development](DEVELOPMENT.md).
+- **Arbitrage v2:** Upgraded pathfinding from 3-token triangles to **Recursive 5-Hop DFS**.
+- **Rug Shield:** Integrated `TokenSafetyChecker` to verify LP locks and authority revocations in real-time.
+- **Async Performance Tracking:** Added non-blocking `PerformanceTracker` to log trade metrics without adding latency.
+- **Slippage & Price Impact:** Added proactive math to `core` to reject trades with > 1.0% price impact.
+- **Comprehensive Testing:** Added unit and integration tests across `core` and `strategy`.
+- **Technical Documentation:** Formalized strategy guides and Operational ADRs (015, 016).
 
 ## 🏗️ Architecture Diagram
 ```mermaid

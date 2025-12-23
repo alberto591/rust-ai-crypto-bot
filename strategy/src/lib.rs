@@ -2,6 +2,8 @@ pub mod ports;
 pub mod adapters;
 pub mod graph; // "The Brain" market graph
 pub mod arb;   // "The Finder" search engine
+pub mod analytics;
+pub mod safety;
 
 #[cfg(test)]
 mod hft_tests;
@@ -15,7 +17,6 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use solana_sdk::pubkey::Pubkey;
-use anyhow::Result;
 use parking_lot::RwLock;  // Faster than std::sync::Mutex
 use smallvec::SmallVec;   // Stack-allocated vectors
 
@@ -26,6 +27,8 @@ pub struct StrategyEngine {
     executor: Option<Arc<dyn ExecutionPort>>,
     simulator: Option<Arc<dyn BundleSimulator>>,
     ai_model: Option<Arc<dyn AIModelPort>>,
+    performance_tracker: Option<Arc<crate::analytics::performance::PerformanceTracker>>,
+    safety_checker: Option<Arc<crate::safety::token_validator::TokenSafetyChecker>>,
     pub total_simulated_pnl: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -33,21 +36,51 @@ impl StrategyEngine {
     pub fn new(
         executor: Option<Arc<dyn ExecutionPort>>, 
         simulator: Option<Arc<dyn BundleSimulator>>,
-        ai_model: Option<Arc<dyn AIModelPort>>
+        ai_model: Option<Arc<dyn AIModelPort>>,
+        performance_tracker: Option<Arc<crate::analytics::performance::PerformanceTracker>>,
+        safety_checker: Option<Arc<crate::safety::token_validator::TokenSafetyChecker>>,
     ) -> Self {
         Self {
             arb_strategy: ArbitrageStrategy::new(),
             executor,
             simulator,
             ai_model,
+            performance_tracker,
+            safety_checker,
             total_simulated_pnl: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
-    pub async fn process_event(&self, update: mev_core::PoolUpdate) -> Result<Option<ArbitrageOpportunity>> {
-        // 1. Core Logic: Graph-based search
-        if let Some(opportunity) = self.arb_strategy.process_update(update.clone()) {
-            info!("💡 Profitable path found: {} lamports expected.", opportunity.expected_profit_lamports);
+    pub async fn process_event(
+        &self, 
+        update: PoolUpdate, 
+        initial_amount: u64,
+        jito_tip_lamports: u64,
+        max_slippage_bps: u16,
+    ) -> anyhow::Result<Option<ArbitrageOpportunity>> {
+        // 🛡️ SAFETY GATES (Institutional Grade)
+        const MAX_TRADE_SIZE: u64 = 1_000_000_000; // 1.0 SOL (Panic Limit)
+        const MIN_PROFIT_THRESHOLD: u64 = 5_000;   // Must make at least 5000 lamports
+        
+        // Check 1: Is the bet too big?
+        if initial_amount > MAX_TRADE_SIZE {
+            error!("⛔ SAFETY TRIGGER: Trade size {} exceeds limit!", initial_amount);
+            return Ok(None);
+        }
+
+        // 1. Update Graph & Find Cycle
+        let opportunity = match self.arb_strategy.process_update(update, initial_amount) {
+            Some(opp) => opp,
+            None => return Ok(None),
+        };
+
+        // Check 2: Is the profit worth the gas?
+        if opportunity.expected_profit_lamports < MIN_PROFIT_THRESHOLD {
+            debug!("⛔ SAFETY TRIGGER: Profit {} is too small for gas fees.", opportunity.expected_profit_lamports);
+            return Ok(None);
+        }
+
+        info!("💡 Profitable path found: {} lamports expected.", opportunity.expected_profit_lamports);
 
             // 2. AI validation layer
             let ai_confidence = if let Some(model) = &self.ai_model {
@@ -63,13 +96,28 @@ impl StrategyEngine {
 
             info!("🚀 AI Approved: High confidence ({:.2}). Triggering execution pipeline...", ai_confidence);
             
+            // 2.5 Safety Filter (Rug Shield)
+            if let Some(checker) = &self.safety_checker {
+                // Check all output mints in the path (excluding the start/end which is usually SOL/USDC)
+                for step in &opportunity.steps {
+                    if !checker.is_safe_to_trade(&step.output_mint, &step.pool).await {
+                        warn!("⛔ SAFETY: Token {} in pool {} failed safety check. Aborting trade.", step.output_mint, step.pool);
+                        return Ok(None);
+                    }
+                }
+            }
+
             // 3. Infrastructure interaction via Ports
             if let Some(executor) = &self.executor {
-                let tip_lamports = 10_000; // Standard tip
+                let tip_lamports = jito_tip_lamports; 
                 
                 // Optional Simulation
                 if let Some(simulator) = &self.simulator {
-                    let instructions = executor.build_bundle_instructions(opportunity.clone(), tip_lamports).await?;
+                    let instructions = executor.build_bundle_instructions(
+                        opportunity.clone(), 
+                        tip_lamports, 
+                        max_slippage_bps
+                    ).await?;
                     match simulator.simulate_bundle(&instructions, executor.pubkey()).await {
                         Ok(units) => info!("✅ Simulation confirmed: {} units.", units),
                         Err(e) => {
@@ -82,8 +130,19 @@ impl StrategyEngine {
                 // 4. Track stats
                 self.total_simulated_pnl.fetch_add(opportunity.expected_profit_lamports, std::sync::atomic::Ordering::SeqCst);
 
+                // 4.5 Log to Performance Tracker (Non-blocking)
+                if let Some(tracker) = &self.performance_tracker {
+                    let token_label = format!("{:?}", opportunity.steps.last().map(|s| s.output_mint));
+                    tracker.log_trade(&token_label, opportunity.expected_profit_lamports as i64, "Live").await;
+                }
+
                 // 5. Atomic Execution
-                match executor.build_and_send_bundle(opportunity.clone(), solana_sdk::hash::Hash::default(), tip_lamports).await {
+                match executor.build_and_send_bundle(
+                    opportunity.clone(), 
+                    solana_sdk::hash::Hash::default(), 
+                    tip_lamports,
+                    max_slippage_bps
+                ).await {
                     Ok(bundle_id) => {
                         info!("🔥 BUNDLE DISPATCHED: {}", bundle_id);
                         return Ok(Some(opportunity));
@@ -94,13 +153,10 @@ impl StrategyEngine {
                     }
                 }
             } else {
-                warn!("📡 Execution port DISCONNECTED. Observation mode only.");
                 return Ok(Some(opportunity));
             }
         }
-        Ok(None)
     }
-}
 
 pub struct ArbitrageStrategy {
     graph: RwLock<DiGraph<Pubkey, PoolUpdate>>,  // HFT: RwLock for concurrent reads
@@ -121,7 +177,7 @@ impl ArbitrageStrategy {
         }
     }
 
-    pub fn process_update(&self, update: PoolUpdate) -> Option<ArbitrageOpportunity> {
+    pub fn process_update(&self, update: PoolUpdate, initial_amount: u64) -> Option<ArbitrageOpportunity> {
         // HFT OPTIMIZATION: Minimize write-lock duration
         
         // 1. Fast path: Try read-only lookup first
@@ -140,11 +196,13 @@ impl ArbitrageStrategy {
                 
                 let a = *nodes.entry(update.mint_a).or_insert_with(|| graph.add_node(update.mint_a));
                 let b = *nodes.entry(update.mint_b).or_insert_with(|| graph.add_node(update.mint_b));
+                
+                tracing::info!("🧠 Graph Updated: {} Nodes, {} Edges", graph.node_count(), graph.edge_count());
                 (a, b)
             }
         };
 
-        // 3. Update edges (write-lock required)
+        // 3. Update the market graph
         {
             let mut graph = self.graph.write();
             let update_edge = |graph: &mut DiGraph<Pubkey, PoolUpdate>, from, to, data: PoolUpdate| {
@@ -161,12 +219,11 @@ impl ArbitrageStrategy {
         // 4. Search for cycles (read-lock only)
         let graph = self.graph.read();
         let max_hops = 5;
-        let initial_amount = 1_000_000_000u64; // 1 SOL
         let mut best_opp: Option<ArbitrageOpportunity> = None;
         let mut visited: SmallVec<[NodeIndex; 8]> = SmallVec::new();  // Stack-allocated for common case
         visited.push(node_a);
 
-        self.find_cycles_recursive(&graph, node_a, node_a, initial_amount, &mut visited, &mut SmallVec::new(), &mut best_opp, max_hops);
+        self.find_cycles_recursive(&graph, node_a, node_a, initial_amount, initial_amount, &mut visited, &mut SmallVec::new(), &mut best_opp, max_hops);
         
         best_opp
     }
@@ -178,6 +235,7 @@ impl ArbitrageStrategy {
         current_node: NodeIndex,
         start_node: NodeIndex,
         current_amount: u64,
+        initial_amount: u64,
         visited: &mut SmallVec<[NodeIndex; 8]>,      // HFT: Stack-allocated
         current_steps: &mut SmallVec<[SwapStep; 8]>, // HFT: Stack-allocated
         best_opp: &mut Option<ArbitrageOpportunity>,
@@ -232,8 +290,8 @@ impl ArbitrageStrategy {
 
             // 3. Cycle detected?
             if next_node == start_node {
-                if amount_out > 1_000_000_000 { // Start amount
-                    let profit = amount_out - 1_000_000_000;
+                if amount_out > initial_amount { // Use provided initial amount
+                    let profit = amount_out - initial_amount;
                     let mut steps = current_steps.clone();
                     steps.push(step);
                     
@@ -241,7 +299,7 @@ impl ArbitrageStrategy {
                         *best_opp = Some(ArbitrageOpportunity {
                             steps: steps.to_vec(),  // Convert SmallVec to Vec for API
                             expected_profit_lamports: profit,
-                            input_amount: 1_000_000_000,
+                            input_amount: initial_amount,
                             total_fees_bps,
                             max_price_impact_bps,
                             min_liquidity,
@@ -265,6 +323,7 @@ impl ArbitrageStrategy {
                     next_node,
                     start_node,
                     amount_out,
+                    initial_amount,
                     visited,
                     current_steps,
                     best_opp,
@@ -308,15 +367,15 @@ mod tests {
         // Create a 4-hop profitable cycle: SOL -> USDC -> BONK -> RAY -> SOL
         // All pools must be deep enough for a 1 SOL (1B lamport) trade
         // SOL/USDC: 1 SOL = 100 USDC (Reserves: 100,000 SOL / 10,000,000 USDC)
-        strategy.process_update(mock_pool("58oQChGsNrtmhaJSRph38tB3BwpL66F42FMa86Fv3Gry", mint_sol, mint_usdc, 100_000_000_000_000, 10_000_000_000_000_000));
+        strategy.process_update(mock_pool("58oQChGsNrtmhaJSRph38tB3BwpL66F42FMa86Fv3Gry", mint_sol, mint_usdc, 100_000_000_000_000, 10_000_000_000_000_000), 1_000_000_000);
         // USDC/BONK: 100 USDC = 100M BONK (Reserves: 10,000,000 USDC / 10,000,000,000,000 BONK)
-        strategy.process_update(mock_pool("AVs91fXYvQJdufSs6S6S8kSEbd67QpUtyUfV8vUjJsc", mint_usdc, mint_bonk, 10_000_000_000_000_000, 10_000_000_000_000_000_000));
-        // BONK/RAY: 100M BONK = 50 RAY (Reserves: 10,000,000,000,000 BONK / 5,000,000,000,000 lamports)
-        strategy.process_update(mock_pool("DZ6ayPbaB9p8Kx7tH5rTMGidMjgjM8HhnRizAnV8hX5P", mint_bonk, mint_ray, 10_000_000_000_000_000_000, 5_000_000_000_000_000_000));
-        // RAY/SOL: 50 RAY = 1.1 SOL (Reserves: 5,000,000,000,000 lamports / 110,000,000,000 lamports)
+        strategy.process_update(mock_pool("AVs91fXYvQJdufSs6S6S8kSEbd67QpUtyUfV8vUjJsc", mint_usdc, mint_bonk, 10_000_000_000_000_000, 10_000_000_000_000_000_000), 1_000_000_000);
+        // BONK/RAY: 100M BONK = 50 RAY (Reserves: 10,000,000,000,000 BONK / 5,000_000_000_000 lamports)
+        strategy.process_update(mock_pool("DZ6ayPbaB9p8Kx7tH5rTMGidMjgjM8HhnRizAnV8hX5P", mint_bonk, mint_ray, 10_000_000_000_000_000_000, 5_000_000_000_000_000_000), 1_000_000_000);
+        // RAY/SOL: 50 RAY = 1.1 SOL (Reserves: 5,000_000_000_000 lamports / 110,000_000_000 lamports)
         let final_update = mock_pool("7XawhbbxtsRcQA8KTkHT9f9nc6d69UeMvdxS1ioL69hY", mint_ray, mint_sol, 5_000_000_000_000_000_000, 110_000_000_000_000_000_000);
         
-        let opp = strategy.process_update(final_update).expect("Should find cycle");
+        let opp = strategy.process_update(final_update, 1_000_000_000).expect("Should find cycle");
         
         assert_eq!(opp.steps.len(), 4);
         assert!(opp.expected_profit_lamports > 0);
@@ -334,15 +393,40 @@ mod tests {
 
         // Create a cycle but with high price impact on one leg
         // SOL/USDC (Deep)
-        strategy.process_update(mock_pool("58oQChGsNrtmhaJSRph38tB3BwpL66F42FMa86Fv3Gry", mint_sol, mint_usdc, 1_000_000_000_000, 100_000_000_000_000));
+        strategy.process_update(mock_pool("58oQChGsNrtmhaJSRph38tB3BwpL66F42FMa86Fv3Gry", mint_sol, mint_usdc, 1_000_000_000_000, 100_000_000_000_000), 1_000_000_000);
         // USDC/RAY (Deep)
-        strategy.process_update(mock_pool("AVs91fXYvQJdufSs6S6S8kSEbd67QpUtyUfV8vUjJsc", mint_usdc, mint_ray, 100_000_000_000_000, 1_000_000_000_000_000));
+        strategy.process_update(mock_pool("AVs91fXYvQJdufSs6S6S8kSEbd67QpUtyUfV8vUjJsc", mint_usdc, mint_ray, 100_000_000_000_000, 1_000_000_000_000_000), 1_000_000_000);
         // RAY/SOL (SHALLOW POOL: Only 1B lamports, trading 1B. Impact = 50%)
         let shallow_update = mock_pool("DZ6ayPbaB9p8Kx7tH5rTMGidMjgjM8HhnRizAnV8hX5P", mint_ray, mint_sol, 1_000_000_000, 1_000_000_000);
         
-        let opp = strategy.process_update(shallow_update);
+        let opp = strategy.process_update(shallow_update, 1_000_000_000);
         
         // Should be None because price impact > 1%
         assert!(opp.is_none());
+    }
+
+    #[test]
+    fn test_0_1_sol_triangular_arb() {
+        let strategy = ArbitrageStrategy::new();
+        let initial_amount = 100_000_000; // 0.1 SOL
+        
+        let mint_sol = Pubkey::new_unique();
+        let mint_usdc = Pubkey::new_unique();
+        let mint_usdt = Pubkey::new_unique();
+
+        // 1. SOL/USDC: 1 SOL = 200 USDC (Deep pool)
+        strategy.process_update(mock_pool(&Pubkey::new_unique().to_string(), &mint_sol.to_string(), &mint_usdc.to_string(), 100_000_000_000, 20_000_000_000_000), initial_amount);
+        // 2. USDC/USDT: 1 USDC = 1 USDT (Deep pool)
+        strategy.process_update(mock_pool(&Pubkey::new_unique().to_string(), &mint_usdc.to_string(), &mint_usdt.to_string(), 100_000_000_000_000, 100_000_000_000_000), initial_amount);
+        // 3. USDT/SOL: 1 USDT = 0.01 SOL (1 SOL = 100 USDT). 
+        // Deep reserves to keep price impact < 1% for 20B USDT input.
+        let final_update = mock_pool(&Pubkey::new_unique().to_string(), &mint_usdt.to_string(), &mint_sol.to_string(), 2_000_000_000_000, 20_000_000_000);
+        
+        let opp = strategy.process_update(final_update, initial_amount).expect("Should find cycle");
+
+        
+        assert_eq!(opp.steps.len(), 3);
+        assert_eq!(opp.input_amount, initial_amount);
+        assert!(opp.expected_profit_lamports > initial_amount / 2); // Should be roughly 0.1 SOL profit
     }
 }

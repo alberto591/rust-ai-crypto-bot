@@ -39,8 +39,13 @@ impl JitoExecutor {
         let auth_arc = Arc::new(Keypair::from_bytes(&auth_keypair.to_bytes())?);
         let payer_pubkey = auth_arc.pubkey();
         
-        tracing::info!("🔗 Connecting to Jito (No-Auth): {}", block_engine_url);
-        let client = get_searcher_client_no_auth(block_engine_url).await?;
+        let mut client = get_searcher_client_no_auth(block_engine_url).await?;
+        
+        // Light 4 Verification: Attempt a simple request to confirm connectivity
+        match client.get_tip_accounts(jito_protos::searcher::GetTipAccountsRequest {}).await {
+            Ok(_) => tracing::info!("✅ PING SENT! Jito Block Engine is responsive."),
+            Err(e) => tracing::warn!("⚠️ Jito Ping Failed: {}. Connection might be limited.", e),
+        }
         
         let rpc = RpcClient::new(rpc_url.to_string());
 
@@ -107,8 +112,14 @@ impl ExecutionPort for JitoExecutor {
         &self,
         opportunity: ArbitrageOpportunity,
         tip_lamports: u64,
+        max_slippage_bps: u16,
     ) -> anyhow::Result<Vec<solana_sdk::instruction::Instruction>> {
         let mut instructions = Vec::new();
+
+        // Slippage Calculation: min_amount_out = input * (1 - slippage)
+        // bps = 1/10000. So 1% = 100 bps.
+        let min_amount_out = (opportunity.input_amount as u128 * (10000 - max_slippage_bps) as u128 / 10000) as u64;
+
 
         // 1. Build Swap Instructions using KeyProvider (Decoupled Infrastructure)
         if let Some(ref provider) = self.key_provider {
@@ -124,8 +135,9 @@ impl ExecutionPort for JitoExecutor {
                     instructions.push(crate::raydium_builder::swap_base_in(
                         &final_keys,
                         opportunity.input_amount,
-                        0, 
+                        min_amount_out, 
                     ));
+
                 }
             }
         } else if std::env::var("SIMULATION").is_ok() {
@@ -158,10 +170,14 @@ impl ExecutionPort for JitoExecutor {
         opportunity: ArbitrageOpportunity,
         _recent_blockhash: solana_sdk::hash::Hash,
         tip_lamports: u64,
+        max_slippage_bps: u16,
     ) -> anyhow::Result<String> {
-        let instructions = self.build_bundle_instructions(opportunity, tip_lamports).await?;
-        self.send_bundle(instructions, tip_lamports).await
-            .map_err(|e| anyhow::anyhow!("Bundle failed: {}", e))
+        let ixs = self.build_bundle_instructions(opportunity, tip_lamports, max_slippage_bps).await?;
+        
+        match self.send_bundle(ixs, tip_lamports).await {
+            Ok(sig) => Ok(sig),
+            Err(e) => Err(anyhow::anyhow!("Jito bundle submission failed: {}", e)),
+        }
     }
 
     fn pubkey(&self) -> &solana_sdk::pubkey::Pubkey {

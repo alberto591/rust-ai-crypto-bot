@@ -29,6 +29,7 @@ pub trait ExecutionPort: Send + Sync {
         &self,
         opportunity: ArbitrageOpportunity,
         tip_lamports: u64,
+        max_slippage_bps: u16,
     ) -> Result<Vec<Instruction>>;
 
     /// Build and send a complete bundle to the network
@@ -37,6 +38,7 @@ pub trait ExecutionPort: Send + Sync {
         opportunity: ArbitrageOpportunity,
         recent_blockhash: Hash,
         tip_lamports: u64,
+        max_slippage_bps: u16,
     ) -> Result<String>;
 
     /// Get the public key of the execution account

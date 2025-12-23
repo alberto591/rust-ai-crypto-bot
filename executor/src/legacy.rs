@@ -15,6 +15,9 @@ use std::error::Error;
 /// Legacy executor using standard Solana RPC
 pub struct LegacyExecutor {
     client: RpcClient,
+    payer: solana_sdk::signature::Keypair,
+    payer_pubkey: solana_sdk::pubkey::Pubkey,
+    key_provider: Option<std::sync::Arc<dyn strategy::ports::PoolKeyProvider>>,
 }
 
 impl LegacyExecutor {
@@ -25,12 +28,17 @@ impl LegacyExecutor {
     ///
     /// # Returns
     /// Configured executor with confirmed commitment level
-    pub fn new(rpc_url: &str) -> Self {
+    pub fn new(
+        rpc_url: &str, 
+        payer: solana_sdk::signature::Keypair,
+        key_provider: Option<std::sync::Arc<dyn strategy::ports::PoolKeyProvider>>
+    ) -> Self {
         let client = RpcClient::new_with_commitment(
             rpc_url.to_string(),
             CommitmentConfig::confirmed(),
         );
-        Self { client }
+        let payer_pubkey = payer.pubkey();
+        Self { client, payer, payer_pubkey, key_provider }
     }
 
     /// Execute a standard transaction via RPC
@@ -67,6 +75,20 @@ impl LegacyExecutor {
             &[payer], // Signers
             recent_blockhash,
         );
+
+        // 🛡️ SAFETY ADDITION: PRE-FLIGHT SIMULATION
+        // Ask the node: "If I ran this, would it work?"
+        tracing::debug!("🕵️ Simulating transaction...");
+        let simulation = self.client.simulate_transaction(&tx)?;
+        
+        if let Some(err) = simulation.value.err {
+            // If simulation fails, WE ABORT. We do not send it.
+            tracing::error!("❌ Simulation Failed: {:?}", err);
+            tracing::error!("   Logs: {:?}", simulation.value.logs);
+            return Err("Pre-flight simulation failed. Trade aborted safely.".into());
+        }
+        
+        tracing::info!("✅ Simulation Passed! Gas used: {}", simulation.value.units_consumed.unwrap_or(0));
 
         // 3. Send and Confirm
         // We use send_and_confirm for testing reliability. 
@@ -127,6 +149,64 @@ impl LegacyExecutor {
     /// Get reference to underlying RPC client for advanced usage
     pub fn client(&self) -> &RpcClient {
         &self.client
+    }
+}
+
+#[async_trait::async_trait]
+impl strategy::ports::PoolKeyProvider for LegacyExecutor {
+    async fn get_swap_keys(&self, pool_address: &solana_sdk::pubkey::Pubkey) -> anyhow::Result<mev_core::raydium::RaydiumSwapKeys> {
+        if let Some(provider) = &self.key_provider {
+            provider.get_swap_keys(pool_address).await
+        } else {
+            Err(anyhow::anyhow!("No PoolKeyProvider configured for LegacyExecutor"))
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl strategy::ports::ExecutionPort for LegacyExecutor {
+    async fn build_bundle_instructions(
+        &self,
+        opportunity: mev_core::ArbitrageOpportunity,
+        _tip_lamports: u64,
+        max_slippage_bps: u16,
+    ) -> anyhow::Result<Vec<Instruction>> {
+        let mut ixs = Vec::new();
+        
+        for step in &opportunity.steps {
+            let keys = strategy::ports::PoolKeyProvider::get_swap_keys(
+                self, // LegacyExecutor doesn't yet have a key resolver, we'll fix this
+                &step.pool
+            ).await?;
+
+            let swap_ix = crate::raydium_builder::swap_base_in(
+                &keys,
+                opportunity.input_amount, // Simplified for now
+                0, // min_amount_out calculated later
+            );
+            ixs.push(swap_ix);
+        }
+
+        Ok(ixs)
+    }
+
+    async fn build_and_send_bundle(
+        &self,
+        opportunity: mev_core::ArbitrageOpportunity,
+        _recent_blockhash: solana_sdk::hash::Hash,
+        tip_lamports: u64,
+        max_slippage_bps: u16,
+    ) -> anyhow::Result<String> {
+        let ixs = self.build_bundle_instructions(opportunity, tip_lamports, max_slippage_bps).await?;
+        
+        match self.execute_standard_tx(&self.payer, &ixs) {
+            Ok(sig) => Ok(sig),
+            Err(e) => Err(anyhow::anyhow!("Legacy execution failed: {}", e)),
+        }
+    }
+
+    fn pubkey(&self) -> &solana_sdk::pubkey::Pubkey {
+        &self.payer_pubkey
     }
 }
 

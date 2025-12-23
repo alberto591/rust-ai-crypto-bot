@@ -26,7 +26,8 @@ mod hft_tests {
             fee_bps: 30,
             timestamp: 0,
         };
-        strategy.process_update(update.clone());
+        strategy.process_update(update.clone(), 1_000_000_000);
+
 
         // Spawn 10 concurrent readers
         let mut handles = vec![];
@@ -36,7 +37,7 @@ mod hft_tests {
             
             handles.push(thread::spawn(move || {
                 // Read operation should not block other reads
-                strategy_clone.process_update(update_clone)
+                strategy_clone.process_update(update_clone, 1_000_000_000)
             }));
         }
 
@@ -67,7 +68,8 @@ mod hft_tests {
                 fee_bps: 0,
                 timestamp: 0,
             };
-            strategy.process_update(update);
+            strategy.process_update(update, 1_000_000_000);
+
         }
 
         // Close the cycle back to start
@@ -82,7 +84,8 @@ mod hft_tests {
             timestamp: 0,
         };
         
-        let opp = strategy.process_update(final_update);
+        let opp = strategy.process_update(final_update, 1_000_000_000);
+
         // 5 hops at zero fees with slight profit should complete
         assert!(opp.is_some(), "Should find profitable cycle");
         assert!(opp.unwrap().expected_profit_lamports > 0);
@@ -149,8 +152,9 @@ mod hft_tests {
                     timestamp: 0,
                 };
                 
-                strategy_clone.process_update(update)
+                strategy_clone.process_update(update, 1_000_000_000)
             }));
+
         }
 
         // All writes should succeed without data races
