@@ -42,13 +42,34 @@ pub fn calculate_effective_price(
 
 /// Placeholder for Concentrated Liquidity (CLMM) math (e.g., Orca Whirlpool).
 /// This is significantly more complex and usually involves tick traversal.
+/// Implementation of simplified CLMM math using virtual reserves for high-frequency discovery.
+/// Note: This is an approximation. In production execution, exact tick-math should be used.
+#[inline(always)]
 pub fn get_amount_out_clmm(
     amount_in: u64,
-    _sqrt_price: u128,
-    _liquidity: u128,
+    sqrt_price_x64: u128,
+    _liquidity: u128, // Currently using price-based approximation for speed
+    fee_bps: u16,
+    a_to_b: bool,
 ) -> u64 {
-    // Simplified placeholder logic for simulation purposes
-    amount_in
+    if amount_in == 0 || sqrt_price_x64 == 0 {
+        return 0;
+    }
+
+    // Convert X64 sqrt price to price
+    // Price = (sqrt_price / 2^64)^2  (This is token_b / token_a)
+    let sqrt_p = sqrt_price_x64 as f64 / (1u128 << 64) as f64;
+    let price = if a_to_b {
+        sqrt_p * sqrt_p
+    } else {
+        1.0 / (sqrt_p * sqrt_p)
+    };
+
+    let fee_multiplier = 1.0 - (fee_bps as f64 / 10000.0);
+    let amount_in_with_fee = amount_in as f64 * fee_multiplier;
+
+    // dy = dx * price
+    (amount_in_with_fee * price) as u64
 }
 
 #[cfg(test)]

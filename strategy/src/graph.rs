@@ -14,12 +14,15 @@ use solana_sdk::pubkey::Pubkey;
 pub struct Edge {
     pub to_token: Pubkey,
     pub pool_address: Pubkey,
+    pub program_id: Pubkey, // Added for DEX identification
     pub fee_numerator: u64,
     pub fee_denominator: u64,
-    // We store reserves to calculate exact output locally
-    // without asking the RPC every time.
-    pub reserve_in: u128,  // Reserve of 'from_token'
-    pub reserve_out: u128, // Reserve of 'to_token'
+    // CPMM Reserves (Raydium)
+    pub reserve_in: u128,
+    pub reserve_out: u128,
+    // CLMM Data (Orca)
+    pub price_sqrt: Option<u128>,
+    pub liquidity: Option<u128>,
 }
 
 pub struct MarketGraph {
@@ -46,8 +49,11 @@ impl MarketGraph {
         from: Pubkey,
         to: Pubkey,
         pool: Pubkey,
+        program_id: Pubkey,
         reserve_from: u64,
         reserve_to: u64,
+        price_sqrt: Option<u128>,
+        liquidity: Option<u128>,
     ) {
         let edges = self.adj.entry(from).or_default();
         
@@ -55,34 +61,59 @@ impl MarketGraph {
         if let Some(edge) = edges.iter_mut().find(|e| e.pool_address == pool) {
             edge.reserve_in = reserve_from as u128;
             edge.reserve_out = reserve_to as u128;
+            edge.price_sqrt = price_sqrt;
+            edge.liquidity = liquidity;
         } else {
             // New connection discovered
             edges.push(Edge {
                 to_token: to,
                 pool_address: pool,
-                fee_numerator: 25, // Default Raydium 0.25%
+                program_id,
+                fee_numerator: 25, // Default. Should be dynamic based on DEX
                 fee_denominator: 10000,
                 reserve_in: reserve_from as u128,
                 reserve_out: reserve_to as u128,
+                price_sqrt,
+                liquidity,
             });
         }
     }
 
     /// Calculates how much 'to_token' you get for 'amount_in'
-    /// Uses Constant Product Formula: dy = (y * dx) / (x + dx)
-    /// (Simplified version ignoring complicated fee math for brevity)
     pub fn get_amount_out(&self, edge: &Edge, amount_in: u64) -> u64 {
-        let amount_in_u128 = amount_in as u128;
-        
-        // Apply Fee (Input amount * (1 - fee))
-        let fee_multiplier = edge.fee_denominator as u128 - edge.fee_numerator as u128;
-        let amount_in_with_fee = amount_in_u128 * fee_multiplier;
-        
-        let numerator = amount_in_with_fee * edge.reserve_out;
-        let denominator = (edge.reserve_in * edge.fee_denominator as u128) + amount_in_with_fee;
+        if edge.program_id == mev_core::constants::ORCA_WHIRLPOOL_PROGRAM {
+            // Orca CLMM Implementation (using virtual reserves from sqrt_price for HFT speed)
+            // Note: In production, full tick-math should be used. 
+            // For triangular/cross-dex discovery, virtual reserves are a high-speed approximation.
+            if let Some(price_sqrt) = edge.price_sqrt {
+                let price = (price_sqrt as f64 / (1u128 << 64) as f64).powi(2);
+                let amount_in_f = amount_in as f64;
+                
+                // dy = dx * price (with fee)
+                let fee = edge.fee_numerator as f64 / edge.fee_denominator as f64;
+                let amount_in_with_fee = amount_in_f * (1.0 - fee);
+                
+                return if edge.reserve_in > edge.reserve_out {
+                     // Trading A for B
+                     (amount_in_with_fee * price) as u64
+                } else {
+                     // Trading B for A
+                     (amount_in_with_fee / price) as u64
+                };
+            }
+            0
+        } else {
+            // Standard CPMM (Raydium)
+            let amount_in_u128 = amount_in as u128;
+            let fee_multiplier = edge.fee_denominator as u128 - edge.fee_numerator as u128;
+            let amount_in_with_fee = amount_in_u128 * fee_multiplier;
+            
+            let numerator = amount_in_with_fee * edge.reserve_out;
+            let denominator = (edge.reserve_in * edge.fee_denominator as u128) + amount_in_with_fee;
 
-        if denominator == 0 { return 0; }
-        (numerator / denominator) as u64
+            if denominator == 0 { return 0; }
+            (numerator / denominator) as u64
+        }
     }
 }
 
@@ -99,7 +130,7 @@ mod tests {
         let pool = Pubkey::new_unique();
 
         // 1. Add edge: 1000 A <-> 2000 B
-        graph.update_edge(token_a, token_b, pool, 1000, 2000);
+        graph.update_edge(token_a, token_b, pool, mev_core::constants::RAYDIUM_V4_PROGRAM, 1000, 2000, None, None);
 
         // 2. Calculate amount out for 10 A
         // CPMM: dy = (2000 * (10*0.9975)) / (1000 + 10*0.9975)

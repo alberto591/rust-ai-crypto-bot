@@ -32,7 +32,7 @@ pub struct AppContext {
     pub config: config::BotConfig,
     pub payer: solana_sdk::signature::Keypair,
     pub engine: Arc<StrategyEngine>,
-    pub wallet_mgr: WalletManager,
+    pub wallet_mgr: Arc<WalletManager>,
     pub performance_tracker: Arc<strategy::analytics::performance::PerformanceTracker>,
     pub metrics: Arc<metrics::BotMetrics>,
     pub risk_mgr: Arc<risk::RiskManager>,
@@ -95,9 +95,16 @@ async fn main() {
     let payer = read_keypair_file(&key_path).expect("Failed to read keypair");
     info!("🔑 Identity: {}", payer.pubkey());
 
-    // 4.2 Initialize Adapters (Infrastructure Layer)
+    // 4.2 Initialize Shared Infrastructure (Base Layer)
     let pool_fetcher = Arc::new(pool_fetcher::PoolKeyFetcher::new(&bot_cfg.rpc_url));
+    let metrics = Arc::new(metrics::BotMetrics::new());
+    let risk_mgr = Arc::new(risk::RiskManager::new());
 
+    // 4.3 Initialize Performance & Safety
+    let performance_tracker = Arc::new(strategy::analytics::performance::PerformanceTracker::new("logs/performance.log").await);
+    let safety_checker = Arc::new(strategy::safety::token_validator::TokenSafetyChecker::new(&bot_cfg.rpc_url));
+
+    // 4.4 Initialize Execution Engine (Abstracted)
     // Dynamic Executor Selection: Jito for Mainnet, Legacy for Devnet/Local
     let execution_port: Arc<dyn strategy::ports::ExecutionPort> = if bot_cfg.jito_url.is_empty() {
         info!("⚠️ Jito URL empty. Falling back to Legacy RPC Executor.");
@@ -105,13 +112,15 @@ async fn main() {
             &bot_cfg.rpc_url,
             solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).expect("Failed to clone keypair"),
             Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
+            Some(Arc::clone(&metrics) as Arc<dyn strategy::ports::TelemetryPort>),
         ))
     } else {
         match executor::jito::JitoExecutor::new(
             &bot_cfg.jito_url,
             &payer,
             &bot_cfg.rpc_url,
-            Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>)
+            Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
+            Some(Arc::clone(&metrics) as Arc<dyn strategy::ports::TelemetryPort>),
         ).await {
             Ok(jito) => Arc::new(jito),
             Err(e) => {
@@ -120,29 +129,25 @@ async fn main() {
                     &bot_cfg.rpc_url,
                     solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).expect("Failed to clone keypair"),
                     Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
+                    Some(Arc::clone(&metrics) as Arc<dyn strategy::ports::TelemetryPort>),
                 ))
             }
         }
     };
 
-    // 4.3 Initialize Domain Services (Strategy Layer)
-    let performance_tracker = Arc::new(strategy::analytics::performance::PerformanceTracker::new("logs/performance.log").await);
-    let safety_checker = Arc::new(strategy::safety::token_validator::TokenSafetyChecker::new(&bot_cfg.rpc_url));
-
+    // 4.5 Initialize Strategy Engine (The Brain)
     let engine = Arc::new(StrategyEngine::new(
         Some(execution_port),
         None, // No simulation in prod
         None, // No AI model yet
         Some(Arc::clone(&performance_tracker)),
         Some(Arc::clone(&safety_checker)),
+        Some(Arc::clone(&metrics) as Arc<dyn strategy::ports::TelemetryPort>),
     ));
 
-    let wallet_mgr = WalletManager::new(&bot_cfg.rpc_url);
-
-    let metrics = Arc::new(metrics::BotMetrics::new());
-    let risk_mgr = Arc::new(risk::RiskManager::new());
+    let wallet_mgr = Arc::new(WalletManager::new(&bot_cfg.rpc_url));
     
-    // 4.3.5 Initialize Alerting
+    // 4.6 Initialize Alerting
     let telegram_config = if let (Some(token), Some(chat_id)) = (&bot_cfg.telegram_bot_token, &bot_cfg.telegram_chat_id) {
         let token_str: String = token.clone();
         let chat_id_str: String = chat_id.clone();
@@ -159,8 +164,13 @@ async fn main() {
     telemetry::init_metrics();
     tokio::spawn(telemetry::serve_metrics());
     
-    // Start health monitor (1 hour status)
-    tokio::spawn(alerts::monitor_health(Arc::clone(&alert_mgr), Arc::clone(&metrics)));
+    // Start health monitor (status checks every 5 minutes + hourly summary)
+    tokio::spawn(alerts::monitor_health(
+        Arc::clone(&alert_mgr), 
+        Arc::clone(&metrics),
+        Arc::clone(&wallet_mgr),
+        payer.pubkey()
+    ));
 
     // Start 5-minute periodic reporting (Log-based)
     let metrics_clone = Arc::clone(&metrics);
@@ -295,6 +305,18 @@ async fn main() {
     info!("🔥 Engine IGNITION. Waiting for market events...");
     info!("📊 TUI Dashboard ACTIVE (press 'q' to quit)");
 
+    // 6.6 Startup Alert
+    alert_mgr.send_alert(
+        alerts::AlertSeverity::Success, 
+        "HFT Engine Started", 
+        &format!("Engine version {} is now live and listening for market events. Monitoring {} pools.", env!("CARGO_PKG_VERSION"), pools_to_watch.len()),
+        vec![
+            alerts::Field { name: "Identity".to_string(), value: context.payer.pubkey().to_string(), inline: false },
+            alerts::Field { name: "Jito".to_string(), value: (!bot_cfg.jito_url.is_empty()).to_string(), inline: true },
+            alerts::Field { name: "RPC".to_string(), value: bot_cfg.rpc_url.clone(), inline: false },
+        ]
+    ).await;
+
     // 🧪 FORCED_ARB_MOCK: Removed for Phase 2 Verification
     // High-fidelity simulation now uses real market data with simulation execution.
 
@@ -355,7 +377,7 @@ async fn main() {
                             telemetry::OPPORTUNITIES_PROFITABLE.inc();
 
                             // 📊 Metrics Tracking
-                            ctx.metrics.log_opportunity(true, true);
+                            ctx.metrics.log_opportunity(true);
                             
                             // 📉 Risk Recording
                             ctx.risk_mgr.record_trade(ctx.config.default_trade_size_lamports, opportunity.expected_profit_lamports as i64);

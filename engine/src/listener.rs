@@ -37,6 +37,16 @@ pub async fn start_listener(
     let mut sub_to_pool = HashMap::new();
     let mut pending_subs = HashMap::new(); // Request ID -> Pool Addr
     
+    // 0. Subscribe to Slots (Heartbeat)
+    let slot_sub_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 9999,
+        "method": "slotSubscribe"
+    });
+    if let Err(e) = write.send(Message::Text(slot_sub_msg.to_string().into())).await {
+        tracing::error!("❌ Slot Subscription failed: {}", e);
+    }
+
     let mut req_id = 1;
     for account in accounts {
         let msg_id = req_id;
@@ -67,6 +77,10 @@ pub async fn start_listener(
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
+                // Debug: Log that we got *something* (ignore requests/responses with ID)
+                if !text.contains("\"id\":") {
+                     tracing::info!("📩 WS Msg ({} chars): {:.100}...", text.len(), text);
+                }
                 if let Ok(json) = serde_json::from_str::<Value>(&text) {
                     // A. Handle Subscription Responses
                     if let Some(id_val) = json.get("id").and_then(|v| v.as_u64()) {
@@ -89,31 +103,50 @@ pub async fn start_listener(
                                         if let Some(update_str) = data_arr.first().and_then(|v| v.as_str()) {
                                             use base64::{Engine as _, engine::general_purpose};
                                             if let Ok(bytes) = general_purpose::STANDARD.decode(update_str) {
-                                                if bytes.len() >= std::mem::size_of::<mev_core::raydium::AmmInfo>() {
+                                                let pool_addr = Pubkey::from_str(pool_addr_str).unwrap_or_default();
+                                                let ts = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap()
+                                                    .as_secs() as i64;
+
+                                                // 1. Identify DEX by data length or owner
+                                                if bytes.len() == 653 { // Orca Whirlpool
+                                                    let whirlpool: &mev_core::orca::Whirlpool = unsafe {
+                                                        &*(bytes.as_ptr() as *const mev_core::orca::Whirlpool)
+                                                    };
+                                                    let update = MarketUpdate {
+                                                        pool_address: pool_addr,
+                                                        program_id: mev_core::constants::ORCA_WHIRLPOOL_PROGRAM,
+                                                        coin_mint: whirlpool.token_mint_a(),
+                                                        pc_mint: whirlpool.token_mint_b(),
+                                                        coin_reserve: 0,
+                                                        pc_reserve: 0,
+                                                        price_sqrt: Some(whirlpool.sqrt_price()),
+                                                        liquidity: Some(whirlpool.liquidity()),
+                                                        timestamp: ts,
+                                                    };
+                                                    if tx.send(update).await.is_err() { break; }
+                                                } else if bytes.len() == 752 { // Raydium V4 CPMM
                                                     let amm_info: &mev_core::raydium::AmmInfo = unsafe {
                                                         &*(bytes.as_ptr() as *const mev_core::raydium::AmmInfo)
                                                     };
-
-                                                    let pool_addr = Pubkey::from_str(pool_addr_str).unwrap_or_default();
-                                                    let ts = std::time::SystemTime::now()
-                                                        .duration_since(std::time::UNIX_EPOCH)
-                                                        .unwrap()
-                                                        .as_secs() as i64;
-                                                    
                                                     let update = MarketUpdate {
                                                         pool_address: pool_addr,
-                                                        coin_mint: amm_info.base_mint,
-                                                        pc_mint: amm_info.quote_mint,
-                                                        coin_reserve: amm_info.base_reserve,
-                                                        pc_reserve: amm_info.quote_reserve,
+                                                        program_id: mev_core::constants::RAYDIUM_V4_PROGRAM,
+                                                        coin_mint: amm_info.base_mint(),
+                                                        pc_mint: amm_info.quote_mint(),
+                                                        coin_reserve: amm_info.base_reserve(),
+                                                        pc_reserve: amm_info.quote_reserve(),
+                                                        price_sqrt: None,
+                                                        liquidity: None,
                                                         timestamp: ts,
                                                     };
-                                                    
-                                                    // If receiver dropped, stop loop
-                                                    if tx.send(update).await.is_err() {
-                                                        tracing::warn!("🔌 Core loop dropped. Stopping listener.");
-                                                        break; 
-                                                    }
+                                                    if tx.send(update).await.is_err() { break; }
+                                                } else if bytes.len() == 1544 { // Raydium CLMM
+                                                    // TODO: Detailed Raydium CLMM layout. For now, mark as recognized.
+                                                    tracing::debug!("Detected Raydium CLMM update (1544 bytes) for pool {}", pool_addr);
+                                                } else {
+                                                    tracing::trace!("Ignoring unknown account size: {} bytes for pool {}", bytes.len(), pool_addr);
                                                 }
                                             }
                                         }

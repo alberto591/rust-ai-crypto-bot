@@ -1,0 +1,186 @@
+{
+    "dashboard": {
+        "title": "Solana MEV Bot - Phase 3 Metrics",
+        "tags": [
+            "solana",
+            "mev",
+            "arbitrage"
+        ],
+        "timezone": "browser",
+        "panels": [
+            {
+                "id": 1,
+                "title": "Daily P&L (SOL)",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "daily_pnl_lamports / 1000000000",
+                        "legendFormat": "Daily P&L"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 0,
+                    "y": 0
+                }
+            },
+            {
+                "id": 2,
+                "title": "Opportunity Detection Rate",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "rate(opportunities_detected_total[5m])",
+                        "legendFormat": "Detected/sec"
+                    },
+                    {
+                        "expr": "rate(opportunities_profitable_total[5m])",
+                        "legendFormat": "Profitable/sec"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 12,
+                    "y": 0
+                }
+            },
+            {
+                "id": 3,
+                "title": "Detection Latency (ms)",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.50, rate(detection_latency_ms_bucket[5m]))",
+                        "legendFormat": "p50"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.95, rate(detection_latency_ms_bucket[5m]))",
+                        "legendFormat": "p95"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.99, rate(detection_latency_ms_bucket[5m]))",
+                        "legendFormat": "p99"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 0,
+                    "y": 8
+                }
+            },
+            {
+                "id": 4,
+                "title": "Execution Latency (ms)",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.50, rate(execution_latency_ms_bucket[5m]))",
+                        "legendFormat": "p50"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.95, rate(execution_latency_ms_bucket[5m]))",
+                        "legendFormat": "p95"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 12,
+                    "y": 8
+                }
+            },
+            {
+                "id": 5,
+                "title": "Cumulative P&L (SOL)",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "(profit_lamports_total - loss_lamports_total) / 1000000000",
+                        "legendFormat": "Net P&L"
+                    },
+                    {
+                        "expr": "gas_spent_lamports_total / 1000000000",
+                        "legendFormat": "Gas Spent"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 0,
+                    "y": 16
+                }
+            },
+            {
+                "id": 6,
+                "title": "Safety & Risk Metrics",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "rate(safety_rejections_total[5m])",
+                        "legendFormat": "Safety Rejections/sec"
+                    },
+                    {
+                        "expr": "circuit_breaker_triggers_total",
+                        "legendFormat": "Circuit Breaker Triggers"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 12,
+                    "y": 16
+                }
+            },
+            {
+                "id": 7,
+                "title": "WebSocket & RPC Health",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "websocket_connected",
+                        "legendFormat": "WebSocket Status"
+                    },
+                    {
+                        "expr": "rate(rpc_errors_total[5m])",
+                        "legendFormat": "RPC Errors/sec"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 0,
+                    "y": 24
+                }
+            },
+            {
+                "id": 8,
+                "title": "Actual Slippage (BPS)",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.50, rate(actual_slippage_bps_bucket[5m]))",
+                        "legendFormat": "p50"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.95, rate(actual_slippage_bps_bucket[5m]))",
+                        "legendFormat": "p95"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 12,
+                    "y": 24
+                }
+            }
+        ],
+        "refresh": "10s",
+        "time": {
+            "from": "now-1h",
+            "to": "now"
+        }
+    }
+}

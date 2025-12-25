@@ -14,6 +14,7 @@ pub struct TokenSafetyChecker {
     safe_cache: DashMap<Pubkey, std::time::Instant>,
     blacklist: DashMap<Pubkey, std::time::Instant>,
     min_liquidity_lamports: u64,
+    whitelist: Vec<Pubkey>,  // Known-safe tokens (stablecoins, wrapped SOL)
 }
 
 impl TokenSafetyChecker {
@@ -26,10 +27,24 @@ impl TokenSafetyChecker {
             safe_cache: DashMap::new(),
             blacklist: DashMap::new(),
             min_liquidity_lamports: 10_000_000_000, // 10 SOL minimum
+            whitelist: vec![
+                // USDC (Circle) - has freeze authority for regulatory compliance
+                Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap(),
+                // USDT (Tether)
+                Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB").unwrap(),
+                // Wrapped SOL
+                Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(),
+            ],
         }
     }
 
     pub async fn is_safe_to_trade(&self, mint: &Pubkey, pool_id: &Pubkey) -> bool {
+        // SHORT-CIRCUIT: Whitelist check first (known-safe stablecoins)
+        if self.whitelist.contains(mint) {
+            debug!("✅ Token {} is whitelisted. Skipping safety checks.", mint);
+            return true;
+        }
+
         if self.blacklist.contains_key(mint) || self.blacklist.contains_key(pool_id) {
             return false;
         }

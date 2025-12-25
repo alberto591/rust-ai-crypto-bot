@@ -8,6 +8,9 @@ pub mod safety;
 #[cfg(test)]
 mod hft_tests;
 
+#[cfg(test)]
+mod profit_sanity_tests;
+
 
 
 use mev_core::{PoolUpdate, ArbitrageOpportunity, SwapStep};
@@ -21,7 +24,7 @@ use parking_lot::RwLock;  // Faster than std::sync::Mutex
 use smallvec::SmallVec;   // Stack-allocated vectors
 use crate::analytics::volatility::VolatilityTracker;
 
-use crate::ports::{AIModelPort, ExecutionPort, BundleSimulator};
+use crate::ports::{AIModelPort, ExecutionPort, BundleSimulator, TelemetryPort};
 
 pub struct StrategyEngine {
     arb_strategy: ArbitrageStrategy,
@@ -31,6 +34,7 @@ pub struct StrategyEngine {
     performance_tracker: Option<Arc<crate::analytics::performance::PerformanceTracker>>,
     safety_checker: Option<Arc<crate::safety::token_validator::TokenSafetyChecker>>,
     volatility_tracker: Arc<VolatilityTracker>,
+    telemetry: Option<Arc<dyn TelemetryPort>>,  // NEW
     pub total_simulated_pnl: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -41,6 +45,7 @@ impl StrategyEngine {
         ai_model: Option<Arc<dyn AIModelPort>>,
         performance_tracker: Option<Arc<crate::analytics::performance::PerformanceTracker>>,
         safety_checker: Option<Arc<crate::safety::token_validator::TokenSafetyChecker>>,
+        telemetry: Option<Arc<dyn TelemetryPort>>,
     ) -> Self {
         let volatility_tracker = Arc::new(VolatilityTracker::new());
         Self {
@@ -51,6 +56,7 @@ impl StrategyEngine {
             performance_tracker,
             safety_checker,
             volatility_tracker,
+            telemetry,
             total_simulated_pnl: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -87,6 +93,23 @@ impl StrategyEngine {
 
         // 2. Dynamic Tip Calculation
         let profit = opportunity.expected_profit_lamports;
+        
+        // 2.1 Profit Sanity Check: Reject unrealistic profits
+        // If profit > 10% of input, likely bad data (stale prices, flash crash, or bug)
+        let max_reasonable_profit = initial_amount / 10;  // 10% of input
+        if profit > max_reasonable_profit {
+            warn!("⛔ SANITY CHECK: Profit {} lamports ({}%) exceeds reasonable threshold {}. Likely stale data or calculation error. Rejecting opportunity.",
+                profit, 
+                (profit * 100) / initial_amount,
+                max_reasonable_profit
+            );
+            
+            if let Some(ref tel) = self.telemetry {
+                tel.log_profit_sanity_rejection();
+            }
+            return Ok(None);
+        }
+        
         let mut tip_lamports = (profit as f64 * jito_tip_percentage) as u64;
         
         // Apply floor and ceiling
@@ -129,6 +152,9 @@ impl StrategyEngine {
                 for step in &opportunity.steps {
                     if !checker.is_safe_to_trade(&step.output_mint, &step.pool).await {
                         warn!("⛔ SAFETY: Token {} in pool {} failed safety check. Aborting trade.", step.output_mint, step.pool);
+                        if let Some(ref tel) = self.telemetry {
+                            tel.log_safety_rejection();
+                        }
                         return Ok(None);
                     }
                 }

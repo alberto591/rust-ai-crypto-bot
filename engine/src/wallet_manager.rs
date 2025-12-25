@@ -83,6 +83,20 @@ impl WalletManager {
             &[],
         )?)
     }
+
+    /// Get native SOL balance
+    pub fn get_sol_balance(&self, address: &Pubkey) -> Result<u64, Box<dyn Error>> {
+        Ok(self.rpc.get_balance(address)?)
+    }
+
+    /// Get token balance for a given mint
+    pub fn get_token_balance(&self, owner: &Pubkey, mint: &Pubkey) -> Result<u64, Box<dyn Error>> {
+        let ata = get_associated_token_address(owner, mint);
+        match self.rpc.get_token_account_balance(&ata) {
+            Ok(balance) => Ok(balance.amount.parse::<u64>().unwrap_or(0)),
+            Err(_) => Ok(0), // Account likely doesn't exist
+        }
+    }
 }
 
 #[cfg(test)]

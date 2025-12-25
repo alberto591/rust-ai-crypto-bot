@@ -111,19 +111,20 @@ impl TuiApp {
     }
 
     fn ui(&self, f: &mut ratatui::Frame) {
+        // 3. UI Layout - Prioritize Opportunity Table
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
                 Constraint::Length(4),  // Header
-                Constraint::Percentage(50), // Main Content (Opp Table)
-                Constraint::Percentage(50), // Logs
+                Constraint::Percentage(65), // Main Content (Opp Table) - Increased size for better visibility
+                Constraint::Percentage(35), // Logs - Reduced size
             ].as_ref())
             .split(f.size());
 
         let state = self.state.lock().unwrap();
 
-        // 1. Header
+        // [Header Rendering Code - Unchanged] 
         let pnl_sol = state.total_simulated_pnl as f64 / 1_000_000_000.0;
         let uptime = state.start_time.elapsed().as_secs();
         let pools = state.pool_count;
@@ -157,12 +158,13 @@ impl TuiApp {
             .block(Block::default().borders(Borders::ALL).title("Dashboard"));
         f.render_widget(header, chunks[0]);
 
+
         // 2. Opportunity Table
         let header_cells = ["Timestamp", "Hops", "Profit (Lamports)", "Route"]
-            .iter().map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow)));
+            .iter().map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))); // Added BOLD
         let header_row = Row::new(header_cells).height(1).bottom_margin(1);
 
-        let rows = state.recent_opportunities.iter().rev().take(15).map(|opp| {
+        let rows = state.recent_opportunities.iter().rev().take(30).map(|opp| { // Show more rows (30)
             let hops = opp.steps.len().to_string();
             let profit = opp.expected_profit_lamports.to_string();
             
@@ -185,10 +187,10 @@ impl TuiApp {
         });
 
         let t = Table::new(rows, [
-                Constraint::Percentage(10),
-                Constraint::Percentage(5),
-                Constraint::Percentage(15),
-                Constraint::Percentage(70),
+                Constraint::Percentage(15), // Timestamp
+                Constraint::Percentage(5),  // Hops
+                Constraint::Percentage(15), // Profit
+                Constraint::Percentage(65), // Route
             ])
             .header(header_row)
             .block(Block::default().borders(Borders::ALL).title("Recent Arbitrage Opportunities (Live Feed)"))

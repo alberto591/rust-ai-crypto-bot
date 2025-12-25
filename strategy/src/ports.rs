@@ -18,6 +18,7 @@ pub trait AIModelPort: Send + Sync {
 #[async_trait::async_trait]
 pub trait PoolKeyProvider: Send + Sync {
     async fn get_swap_keys(&self, pool_address: &Pubkey) -> Result<mev_core::raydium::RaydiumSwapKeys>;
+    async fn get_orca_keys(&self, pool_address: &Pubkey) -> Result<mev_core::orca::OrcaSwapKeys>;
 }
 
 /// Port for bundle execution services
@@ -53,4 +54,19 @@ pub trait BundleSimulator: Send + Sync {
         instructions: &[Instruction],
         payer: &Pubkey,
     ) -> std::result::Result<u64, String>;
+}
+
+/// Port for telemetry and metrics logging
+pub trait TelemetryPort: Send + Sync {
+    fn log_opportunity(&self, profitable: bool);
+    fn log_profit_sanity_rejection(&self);
+    fn log_safety_rejection(&self);
+    fn log_execution_attempt(&self);
+    fn log_jito_success(&self);
+    fn log_jito_failed(&self);
+    fn log_rpc_fallback_success(&self);
+    fn log_rpc_fallback_failed(&self);
+    fn log_retry_success(&self, retry_number: usize);
+    fn log_endpoint_attempt(&self, endpoint_index: usize);
+    fn log_endpoint_success(&self, endpoint_index: usize);
 }

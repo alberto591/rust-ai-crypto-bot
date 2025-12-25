@@ -92,14 +92,14 @@ mod tests {
 
         // Setup a profitable cycle:
         // 1. SOL -> USDC (Cheap USDC)
-        graph.update_edge(token_sol, token_usdc, pool_1, 1_000_000_000, 100_000_000); 
+        graph.update_edge(token_sol, token_usdc, pool_1, mev_core::constants::RAYDIUM_V4_PROGRAM, 1_000_000_000, 100_000_000, None, None); 
         
         // 2. USDC -> BONK (Cheap BONK)
-        graph.update_edge(token_usdc, token_bonk, pool_2, 100_000_000, 1_000_000_000_000);
+        graph.update_edge(token_usdc, token_bonk, pool_2, mev_core::constants::RAYDIUM_V4_PROGRAM, 100_000_000, 1_000_000_000_000, None, None);
 
         // 3. BONK -> SOL (Expensive SOL)
         // With these reserves, pumping 1 SOL in should get > 1 SOL out
-        graph.update_edge(token_bonk, token_sol, pool_3, 1_000_000_000_000, 1_100_000_000); 
+        graph.update_edge(token_bonk, token_sol, pool_3, mev_core::constants::RAYDIUM_V4_PROGRAM, 1_000_000_000_000, 1_100_000_000, None, None); 
 
         // Run search with 1 SOL input
         let path = ArbFinder::find_best_cycle(&graph, token_sol, 1_000_000); // 0.001 SOL test

@@ -18,6 +18,7 @@ pub struct LegacyExecutor {
     payer: solana_sdk::signature::Keypair,
     payer_pubkey: solana_sdk::pubkey::Pubkey,
     key_provider: Option<std::sync::Arc<dyn strategy::ports::PoolKeyProvider>>,
+    telemetry: Option<std::sync::Arc<dyn strategy::ports::TelemetryPort>>,
 }
 
 impl LegacyExecutor {
@@ -31,14 +32,15 @@ impl LegacyExecutor {
     pub fn new(
         rpc_url: &str, 
         payer: solana_sdk::signature::Keypair,
-        key_provider: Option<std::sync::Arc<dyn strategy::ports::PoolKeyProvider>>
+        key_provider: Option<std::sync::Arc<dyn strategy::ports::PoolKeyProvider>>,
+        telemetry: Option<std::sync::Arc<dyn strategy::ports::TelemetryPort>>,
     ) -> Self {
         let client = RpcClient::new_with_commitment(
             rpc_url.to_string(),
             CommitmentConfig::confirmed(),
         );
         let payer_pubkey = payer.pubkey();
-        Self { client, payer, payer_pubkey, key_provider }
+        Self { client, payer, payer_pubkey, key_provider, telemetry }
     }
 
     /// Execute a standard transaction via RPC
@@ -161,6 +163,14 @@ impl strategy::ports::PoolKeyProvider for LegacyExecutor {
             Err(anyhow::anyhow!("No PoolKeyProvider configured for LegacyExecutor"))
         }
     }
+
+    async fn get_orca_keys(&self, pool_address: &solana_sdk::pubkey::Pubkey) -> anyhow::Result<mev_core::orca::OrcaSwapKeys> {
+        if let Some(provider) = &self.key_provider {
+            provider.get_orca_keys(pool_address).await
+        } else {
+            Err(anyhow::anyhow!("No PoolKeyProvider configured for LegacyExecutor"))
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -172,19 +182,37 @@ impl strategy::ports::ExecutionPort for LegacyExecutor {
         max_slippage_bps: u16,
     ) -> anyhow::Result<Vec<Instruction>> {
         let mut ixs = Vec::new();
-        
-        for step in &opportunity.steps {
-            let keys = strategy::ports::PoolKeyProvider::get_swap_keys(
-                self, // LegacyExecutor doesn't yet have a key resolver, we'll fix this
-                &step.pool
-            ).await?;
+        let mut current_amount_in = opportunity.input_amount;
+        let min_amount_out = (opportunity.input_amount as u128 * (10000 - max_slippage_bps) as u128 / 10000) as u64;
 
-            let swap_ix = crate::raydium_builder::swap_base_in(
-                &keys,
-                opportunity.input_amount, // Simplified for now
-                0, // min_amount_out calculated later
-            );
-            ixs.push(swap_ix);
+        let num_steps = opportunity.steps.len();
+
+        for (i, step) in opportunity.steps.iter().enumerate() {
+            let is_last_step = i == num_steps - 1;
+            let step_min_out = if is_last_step { min_amount_out } else { 0 };
+
+            if step.program_id == mev_core::constants::RAYDIUM_V4_PROGRAM {
+                let keys = strategy::ports::PoolKeyProvider::get_swap_keys(self, &step.pool).await?;
+                ixs.push(crate::raydium_builder::swap_base_in(
+                    &keys,
+                    current_amount_in,
+                    step_min_out, 
+                ));
+            } else if step.program_id == mev_core::constants::ORCA_WHIRLPOOL_PROGRAM {
+                let keys = strategy::ports::PoolKeyProvider::get_orca_keys(self, &step.pool).await?;
+                let a_to_b = step.input_mint == keys.mint_a;
+                ixs.push(crate::orca_builder::swap(
+                    &keys,
+                    current_amount_in,
+                    step_min_out,
+                    0,
+                    true,
+                    a_to_b,
+                ));
+            }
+            
+            // Track amount for multi-hop
+            current_amount_in = step.expected_output;
         }
 
         Ok(ixs)
@@ -217,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_executor_creation() {
-        let executor = LegacyExecutor::new("https://api.mainnet-beta.solana.com");
+        let executor = LegacyExecutor::new("https://api.mainnet-beta.solana.com", Keypair::new(), None);
         // Should create without errors
         assert!(executor.client().commitment() == CommitmentConfig::confirmed());
     }
@@ -228,8 +256,8 @@ mod tests {
         // This test requires a live RPC connection and funded account
         // Run with: cargo test --package executor -- --ignored
 
-        let executor = LegacyExecutor::new("https://api.mainnet-beta.solana.com");
         let payer = Keypair::new();
+        let executor = LegacyExecutor::new("https://api.mainnet-beta.solana.com", Keypair::from_bytes(&payer.to_bytes()).unwrap(), None);
         
         let instruction = system_instruction::transfer(
             &payer.pubkey(),
