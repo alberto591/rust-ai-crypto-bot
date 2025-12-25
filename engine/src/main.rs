@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use dotenvy::dotenv;
 use solana_sdk::signature::{read_keypair_file, Signer};
-use tracing::{info, error};
+use tracing::{info, error, warn};
 
 // Internal Crates
 use mev_core::MarketUpdate;
@@ -12,12 +12,17 @@ use strategy::{StrategyEngine};
 use executor::jito::JitoExecutor;
 use executor::legacy::LegacyExecutor;
 
+mod config;
 mod listener;
 mod pool_fetcher;
 mod devnet_keys;
 mod wallet_manager;
-mod config;
 mod tui;
+mod recorder;
+mod metrics;
+mod risk;
+mod telemetry;
+mod alerts;
 
 use crate::wallet_manager::WalletManager;
 
@@ -29,6 +34,9 @@ pub struct AppContext {
     pub engine: Arc<StrategyEngine>,
     pub wallet_mgr: WalletManager,
     pub performance_tracker: Arc<strategy::analytics::performance::PerformanceTracker>,
+    pub metrics: Arc<metrics::BotMetrics>,
+    pub risk_mgr: Arc<risk::RiskManager>,
+    pub alert_mgr: Arc<alerts::AlertManager>,
 }
 
 #[tokio::main]
@@ -46,7 +54,7 @@ async fn main() {
     info!("🚀 HFT Engine Bootstrapping [Composition Root]...");
 
     // 3. Unified Configuration Layer
-    let config = match config::BotConfig::new() {
+    let bot_cfg: config::BotConfig = match config::BotConfig::new() {
         Ok(cfg) => cfg,
         Err(e) => {
             error!("❌ CRITICAL: Failed to load config: {}", e);
@@ -55,45 +63,61 @@ async fn main() {
     };
     
     // 4. Startup Validation (Fail Fast)
-    if let Err(e) = config.validate() {
+    if let Err(e) = bot_cfg.validate() {
         error!("❌ Configuration Validation Failed: {}", e);
         std::process::exit(1);
     }
     
-    info!("✅ Config Loaded & Validated: RPC={}, Jito={}", config.rpc_url, config.jito_url);
+    // 4.1 Initialize Data Recorder (Ops Layer)
+    let recording_enabled = env::var("DATA_RECORDING_ENABLED").unwrap_or_else(|_| "false".to_string()) == "true";
+    let recorder = if recording_enabled {
+        info!("💾 Data Recording ENABLED. Initializing recorder...");
+        match recorder::AsyncCsvWriter::new("data").await {
+            Ok(r) => Some(Arc::new(r)),
+            Err(e) => {
+                error!("❌ Failed to initialize Data Recorder: {}", e);
+                None
+            }
+        }
+    } else {
+        info!("🚫 Data Recording DISABLED.");
+        None
+    };
     
-    let key_path = if config.keypair_path.is_empty() {
+    info!("✅ Config Loaded & Validated: RPC={}, Jito={}", bot_cfg.rpc_url, bot_cfg.jito_url);
+    
+    let key_path = if bot_cfg.keypair_path.is_empty() {
         format!("{}/.config/solana/id.json", env::var("HOME").unwrap())
     } else {
-        config.keypair_path.clone()
+        bot_cfg.keypair_path.clone()
     };
     
     let payer = read_keypair_file(&key_path).expect("Failed to read keypair");
     info!("🔑 Identity: {}", payer.pubkey());
 
     // 4.2 Initialize Adapters (Infrastructure Layer)
-    let pool_fetcher = Arc::new(pool_fetcher::PoolKeyFetcher::new(&config.rpc_url));
+    let pool_fetcher = Arc::new(pool_fetcher::PoolKeyFetcher::new(&bot_cfg.rpc_url));
 
     // Dynamic Executor Selection: Jito for Mainnet, Legacy for Devnet/Local
-    let execution_port: Arc<dyn strategy::ports::ExecutionPort> = if config.jito_url.is_empty() {
+    let execution_port: Arc<dyn strategy::ports::ExecutionPort> = if bot_cfg.jito_url.is_empty() {
         info!("⚠️ Jito URL empty. Falling back to Legacy RPC Executor.");
         Arc::new(executor::legacy::LegacyExecutor::new(
-            &config.rpc_url,
+            &bot_cfg.rpc_url,
             solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).expect("Failed to clone keypair"),
             Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
         ))
     } else {
-        match JitoExecutor::new(
-            &config.jito_url,
+        match executor::jito::JitoExecutor::new(
+            &bot_cfg.jito_url,
             &payer,
-            &config.rpc_url,
+            &bot_cfg.rpc_url,
             Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>)
         ).await {
             Ok(jito) => Arc::new(jito),
             Err(e) => {
-                error!("❌ Jito initialization failed: {}. Falling back to Legacy.", e);
+                warn!("❌ Jito initialization failed: {}. Falling back to Legacy.", e);
                 Arc::new(executor::legacy::LegacyExecutor::new(
-                    &config.rpc_url,
+                    &bot_cfg.rpc_url,
                     solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).expect("Failed to clone keypair"),
                     Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
                 ))
@@ -103,7 +127,7 @@ async fn main() {
 
     // 4.3 Initialize Domain Services (Strategy Layer)
     let performance_tracker = Arc::new(strategy::analytics::performance::PerformanceTracker::new("logs/performance.log").await);
-    let safety_checker = Arc::new(strategy::safety::token_validator::TokenSafetyChecker::new(&config.rpc_url));
+    let safety_checker = Arc::new(strategy::safety::token_validator::TokenSafetyChecker::new(&bot_cfg.rpc_url));
 
     let engine = Arc::new(StrategyEngine::new(
         Some(execution_port),
@@ -113,39 +137,140 @@ async fn main() {
         Some(Arc::clone(&safety_checker)),
     ));
 
-    let wallet_mgr = WalletManager::new(&config.rpc_url);
+    let wallet_mgr = WalletManager::new(&bot_cfg.rpc_url);
+
+    let metrics = Arc::new(metrics::BotMetrics::new());
+    let risk_mgr = Arc::new(risk::RiskManager::new());
+    
+    // 4.3.5 Initialize Alerting
+    let telegram_config = if let (Some(token), Some(chat_id)) = (&bot_cfg.telegram_bot_token, &bot_cfg.telegram_chat_id) {
+        let token_str: String = token.clone();
+        let chat_id_str: String = chat_id.clone();
+        Some(alerts::TelegramConfig {
+            bot_token: token_str,
+            chat_id: chat_id_str,
+        })
+    } else {
+        None
+    };
+    let alert_mgr = Arc::new(alerts::AlertManager::new(bot_cfg.discord_webhook.clone(), telegram_config));
+
+    // 4.3.6 Initialize Telemetry
+    telemetry::init_metrics();
+    tokio::spawn(telemetry::serve_metrics());
+    
+    // Start health monitor (1 hour status)
+    tokio::spawn(alerts::monitor_health(Arc::clone(&alert_mgr), Arc::clone(&metrics)));
+
+    // Start 5-minute periodic reporting (Log-based)
+    let metrics_clone = Arc::clone(&metrics);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            metrics_clone.print_periodic_update();
+        }
+    });
 
     // 4.4 Assemble Context (Composition Root)
     let context = Arc::new(AppContext {
-        config: config.clone(),
+        config: bot_cfg.clone(),
         payer,
         engine,
         wallet_mgr,
         performance_tracker,
+        metrics,
+        risk_mgr,
+        alert_mgr,
     });
 
     // 4.5 Pre-flight Wallet Verification
-    info!("🧪 Validating Wallet state...");
-    let usdc_mint = devnet_keys::parse_pubkey(devnet_keys::USDC_MINT);
-    if let Some(_ix) = context.wallet_mgr.ensure_ata_exists(&context.payer.pubkey(), &usdc_mint) {
-        info!("📦 Auto-creating USDC ATA...");
+    info!("🧪 Validating Wallet state for monitored tokens...");
+    let mut unique_mints = std::collections::HashSet::new();
+    for pool in config::MONITORED_POOLS {
+        unique_mints.insert(pool.token_a);
+        unique_mints.insert(pool.token_b);
     }
+
+    for mint in &unique_mints {
+        // Skip Native SOL as it doesn't need an ATA
+        if *mint == mev_core::constants::SOL_MINT {
+            continue;
+        }
+
+        if let Some(_ix) = context.wallet_mgr.ensure_ata_exists(&context.payer.pubkey(), &mint) {
+            info!("📦 Auto-creating ATA for token: {}...", mint);
+        }
+    }
+
+    // 4.6 Pre-flight Balance Checks (Gas & Capital)
+    info!("💰 Checking balances...");
+    match context.wallet_mgr.get_sol_balance(&context.payer.pubkey()) {
+        Ok(balance) => {
+            let sol = balance as f64 / 1e9;
+            if balance < 50_000_000 { // 0.05 SOL
+                warn!("⚠️ LOW SOL BALANCE: {:.4} SOL. Gas might run out during high activity.", sol);
+            } else {
+                info!("✅ SOL Balance: {:.4} SOL (Gas Safe)", sol);
+            }
+        }
+        Err(e) => error!("❌ Failed to fetch SOL balance: {}", e),
+    }
+
+    info!("📊 --- STARTUP TOKEN INVENTORY ---");
+    let mut inventory = std::collections::HashMap::new();
+    unique_mints.remove(&mev_core::constants::SOL_MINT); // Already checked SOL
+    for mint in unique_mints {
+        match context.wallet_mgr.get_token_balance(&context.payer.pubkey(), &mint) {
+            Ok(balance) => {
+                let symbol = match mint {
+                    mev_core::constants::USDC_MINT => "USDC",
+                    mev_core::constants::JUP_MINT => "JUP ",
+                    mev_core::constants::RAY_MINT => "RAY ",
+                    mev_core::constants::BONK_MINT => "BONK",
+                    mev_core::constants::WIF_MINT => "WIF ",
+                    _ => "UNKN",
+                };
+                info!("   ├─ {}: {:.6} (raw: {})", symbol, balance as f64 / 1e6, balance); // Assuming 6 decimals for most (USDC/JUP etc)
+                inventory.insert(symbol, balance);
+            }
+            Err(e) => error!("   ├─ Error fetching balance for {}: {}", mint, e),
+        }
+    }
+    info!("   └─ Total: {} tokens tracked", inventory.len());
+    info!("📊 -------------------------------");
     
     let (tx, mut rx) = mpsc::channel::<MarketUpdate>(1024);
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
     
     let mut pools_to_watch = HashMap::new();
-    for addr in config.monitored_pool_addresses.split(',') {
-        if !addr.trim().is_empty() {
-            pools_to_watch.insert(addr.trim().to_string(), ("SOL".to_string(), "USDC".to_string()));
+    
+    // 5. Initialize Monitored Pools (Priority: Static Roadmap List)
+    for pool in config::MONITORED_POOLS {
+        pools_to_watch.insert(
+            pool.address.to_string(), 
+            (pool.token_a.to_string(), pool.token_b.to_string())
+        );
+    }
+
+    // Also include any pools from the .env if present (Merge)
+    for addr in bot_cfg.monitored_pool_addresses.split(',') {
+        let addr_str: &str = addr.trim();
+        if !addr_str.is_empty() {
+             pools_to_watch.entry(addr_str.to_string())
+                 .or_insert_with(|| ("SOL".to_string(), "USDC".to_string()));
         }
     }
 
-    let ws_url = config.ws_url.clone();
+    let ws_url = bot_cfg.ws_url.clone();
     let listener_tx = tx.clone();
     let listener_pools = pools_to_watch.clone();
     let _listener_handle = tokio::spawn(async move {
-        listener::start_listener(ws_url, listener_tx, listener_pools).await;
+        loop {
+            listener::start_listener(ws_url.clone(), listener_tx.clone(), listener_pools.clone()).await;
+            warn!("🔗 WebSocket Listener exited. Reconnecting in 5s...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
     });
 
     // 6. Shutdown Watcher (Best Practice: Coordinated Exit)
@@ -170,100 +295,95 @@ async fn main() {
     info!("🔥 Engine IGNITION. Waiting for market events...");
     info!("📊 TUI Dashboard ACTIVE (press 'q' to quit)");
 
-    // 🧪 FORCED_ARB_MOCK: Inject a profitable cycle for verification
-    if std::env::var("FORCED_ARB_MOCK").unwrap_or_default() == "true" {
-        info!("🧪 FORCED_ARB_MOCK active. Injecting profitable cycle in 5s...");
-        let mock_tx = tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            
-            let sol = devnet_keys::parse_pubkey(devnet_keys::WSOL_MINT);
-            let usdc = devnet_keys::parse_pubkey(devnet_keys::USDC_MINT);
-            let usdt = solana_sdk::pubkey::Pubkey::new_unique(); // Placeholder for triangular
-
-            let pool_id = devnet_keys::parse_pubkey(devnet_keys::SOL_USDC_AMM_ID);
-
-            // 1. SOL -> USDC (Mocking using the real pool ID)
-            let _ = mock_tx.send(mev_core::MarketUpdate {
-                pool_address: pool_id,
-                coin_mint: sol,
-                pc_mint: usdc,
-                coin_reserve: 1_000_000_000_000, 
-                pc_reserve: 200_000_000_000,
-                timestamp: 0,
-            }).await;
-
-            // 2. USDC -> SOL (Reversing back for a 2-hop profitable mock)
-            let _ = mock_tx.send(mev_core::MarketUpdate {
-                pool_address: pool_id,
-                coin_mint: usdc,
-                pc_mint: sol,
-                coin_reserve: 180_000_000_000, // Price discrepancy for mock profit
-                pc_reserve: 1_200_000_000_000,
-                timestamp: 0,
-            }).await;
-        });
-    }
+    // 🧪 FORCED_ARB_MOCK: Removed for Phase 2 Verification
+    // High-fidelity simulation now uses real market data with simulation execution.
 
     // 7. The Core Loop
     loop {
         tokio::select! {
             // A. Process Market Events
             Some(event) = rx.recv() => {
-                // Update TUI pool count
-                if let Ok(mut state) = tui_state.lock() {
-                    state.pool_count += 1;
-                }
-                
                 let domain_update = mev_core::PoolUpdate {
                     pool_address: event.pool_address,
-                    program_id: mev_core::constants::RAYDIUM_V4_PROGRAM,
+                    program_id: event.program_id,
                     mint_a: event.coin_mint,
                     mint_b: event.pc_mint,
                     reserve_a: event.coin_reserve as u128,
                     reserve_b: event.pc_reserve as u128,
-                    fee_bps: 30,
+                    price_sqrt: event.price_sqrt,
+                    liquidity: event.liquidity,
+                    fee_bps: 30, 
                     timestamp: event.timestamp as u64,
                 };
 
+                // Record Market Data
+                if let Some(r) = &recorder {
+                    let r_clone = Arc::clone(r);
+                    let update_clone = domain_update.clone();
+                    tokio::spawn(async move {
+                        r_clone.record(update_clone).await;
+                    });
+                }
+
                 let ctx = Arc::clone(&context);
-                let tui_clone = Arc::clone(&tui_state);
+                let rec_inner = recorder.clone();
                 tokio::spawn(async move {
+                    // Update WebSocket status in telemetry
+                    telemetry::WEBSOCKET_STATUS.set(1);
+
+                    // 🛡️ Risk Check
+                    if let Err(e) = ctx.risk_mgr.can_trade(ctx.config.default_trade_size_lamports) {
+                        tracing::debug!("🚫 Trade blocked by RiskManager: {}", e);
+                        return;
+                    }
+
+                    let start_time = std::time::Instant::now();
                     match ctx.engine.process_event(
                         domain_update, 
                         ctx.config.default_trade_size_lamports,
                         ctx.config.jito_tip_lamports,
-                        ctx.config.max_slippage_bps
+                        ctx.config.jito_tip_percentage,
+                        ctx.config.max_jito_tip_lamports,
+                        ctx.config.max_slippage_bps,
+                        ctx.config.volatility_sensitivity,
+                        ctx.config.max_slippage_ceiling
                     ).await {
                         Ok(Some(opportunity)) => {
-                            if let Ok(mut state) = tui_clone.lock() {
-                                state.total_simulated_pnl += opportunity.expected_profit_lamports;
-                                state.recent_opportunities.push(opportunity.clone());
-                                if state.recent_opportunities.len() > 10 {
-                                    state.recent_opportunities.remove(0);
-                                }
-                                state.recent_logs.push(format!("✅ Opportunity: {} lamports", opportunity.expected_profit_lamports));
-                                if state.recent_logs.len() > 20 {
-                                    state.recent_logs.remove(0);
-                                }
+                            let duration = start_time.elapsed().as_millis() as f64;
+                            telemetry::DETECTION_LATENCY.observe(duration);
+                            telemetry::OPPORTUNITIES_TOTAL.inc();
+                            telemetry::OPPORTUNITIES_PROFITABLE.inc();
+
+                            // 📊 Metrics Tracking
+                            ctx.metrics.log_opportunity(true, true);
+                            
+                            // 📉 Risk Recording
+                            ctx.risk_mgr.record_trade(ctx.config.default_trade_size_lamports, opportunity.expected_profit_lamports as i64);
+
+                            // telemetry::TRADES_EXECUTED.inc();
+                            // telemetry::PROFIT_LAMPORTS.inc_by(opportunity.expected_profit_lamports as f64);
+
+                            if let Some(r) = &rec_inner {
+                                let _ = r.record_arbitrage(opportunity).await;
                             }
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            telemetry::OPPORTUNITIES_TOTAL.inc();
+                            // Opportunity was either not found or rejected by safety checks
+                        }
                         Err(e) => {
-                            error!("Strategy Error: {}", e);
-                            if let Ok(mut state) = tui_clone.lock() {
-                                state.recent_logs.push(format!("❌ Error: {}", e));
-                                if state.recent_logs.len() > 20 {
-                                    state.recent_logs.remove(0);
-                                }
-                            }
+                            telemetry::RPC_ERRORS.inc();
+                            ctx.metrics.rpc_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            error!("💥 Processing error: {}", e);
                         }
                     }
                 });
             }
             
             _ = shutdown_rx.recv() => {
-                info!("👋 Engine shutting down gracefully. Goodbye!");
+                info!("👋 Engine shutting down gracefully...");
+                context.metrics.print_summary();
+                info!("Goodbye!");
                 break;
             }
             

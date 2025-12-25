@@ -22,3 +22,4 @@ smallvec = "1.11"       # Stack-allocated vectors for hot paths
 chrono = "0.4"
 spl-token = "4.0"
 solana-client = "1.17"
+dashmap = "6.1.0"

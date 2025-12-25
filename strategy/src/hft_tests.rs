@@ -2,6 +2,7 @@
 #[cfg(test)]
 mod hft_tests {
     use crate::{ArbitrageStrategy, PoolUpdate};
+    use crate::analytics::volatility::VolatilityTracker;
     use solana_sdk::pubkey::Pubkey;
     use std::sync::Arc;
     use std::thread;
@@ -9,7 +10,7 @@ mod hft_tests {
     #[test]
     fn test_rwlock_concurrent_reads() {
         // Test that multiple threads can read the graph simultaneously (RwLock benefit)
-        let strategy = Arc::new(ArbitrageStrategy::new());
+        let strategy = Arc::new(ArbitrageStrategy::new(Arc::new(VolatilityTracker::new())));
         
         let mint_sol = Pubkey::new_unique();
         let mint_usdc = Pubkey::new_unique();
@@ -23,6 +24,8 @@ mod hft_tests {
             mint_b: mint_usdc,
             reserve_a: 1_000_000_000_000,
             reserve_b: 100_000_000_000_000,
+            price_sqrt: None,
+            liquidity: None,
             fee_bps: 30,
             timestamp: 0,
         };
@@ -50,7 +53,7 @@ mod hft_tests {
     #[test]
     fn test_smallvec_stack_allocation() {
         // Test that SmallVec uses stack allocation for common case (≤8 hops)
-        let strategy = ArbitrageStrategy::new();
+        let strategy = ArbitrageStrategy::new(Arc::new(VolatilityTracker::new()));
         
         let tokens: Vec<Pubkey> = (0..5).map(|_| Pubkey::new_unique()).collect();
         let pools: Vec<Pubkey> = (0..5).map(|_| Pubkey::new_unique()).collect();
@@ -65,6 +68,8 @@ mod hft_tests {
                 mint_b: tokens[i + 1],
                 reserve_a: 100_000_000_000_000,  // Large reserves to avoid slippage
                 reserve_b: 101_000_000_000_000,  // 1% profitable
+                price_sqrt: None,
+                liquidity: None,
                 fee_bps: 0,
                 timestamp: 0,
             };
@@ -80,6 +85,8 @@ mod hft_tests {
             mint_b: tokens[0],
             reserve_a: 100_000_000_000_000,
             reserve_b: 101_000_000_000_000,  // Another 1% gain
+            price_sqrt: None,
+            liquidity: None,
             fee_bps: 0,
             timestamp: 0,
         };
@@ -130,7 +137,7 @@ mod hft_tests {
     #[test]
     fn test_concurrent_write_safety() {
         // Test that concurrent writes are safe (RwLock exclusivity)
-        let strategy = Arc::new(ArbitrageStrategy::new());
+        let strategy = Arc::new(ArbitrageStrategy::new(Arc::new(VolatilityTracker::new())));
         
         let mut handles = vec![];
         for i in 0..5 {
@@ -148,6 +155,8 @@ mod hft_tests {
                     mint_b,
                     reserve_a: (i as u128) * 1_000_000_000,
                     reserve_b: (i as u128) * 1_000_000_000,
+                    price_sqrt: None,
+                    liquidity: None,
                     fee_bps: 30,
                     timestamp: 0,
                 };
