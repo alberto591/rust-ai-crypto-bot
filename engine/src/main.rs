@@ -296,18 +296,25 @@ async fn main() {
     });
 
     // 6.5. TUI Dashboard (Real-time Monitoring)
-    let tui_state = Arc::new(std::sync::Mutex::new(tui::AppState::new()));
-    let tui_state_clone = Arc::clone(&tui_state);
+    let args: Vec<String> = env::args().collect();
+    let no_tui = args.contains(&"--no-tui".to_string());
     
-    // Spawn TUI in separate thread (not async)
-    let _tui_handle = std::thread::spawn(move || {
-        if let Err(e) = tui::TuiApp::new(tui_state_clone).run() {
-            error!("TUI error: {}", e);
-        }
-    });
+    if !no_tui {
+        let tui_state = Arc::new(std::sync::Mutex::new(tui::AppState::new()));
+        let tui_state_clone = Arc::clone(&tui_state);
+        
+        // Spawn TUI in separate thread (not async)
+        let _tui_handle = std::thread::spawn(move || {
+            if let Err(e) = tui::TuiApp::new(tui_state_clone).run() {
+                error!("TUI error: {}", e);
+            }
+        });
+        info!("📊 TUI Dashboard ACTIVE (press 'q' to quit)");
+    } else {
+        info!("📊 TUI Dashboard DISABLED (--no-tui present)");
+    }
 
     info!("🔥 Engine IGNITION. Waiting for market events...");
-    info!("📊 TUI Dashboard ACTIVE (press 'q' to quit)");
 
     // 6.6 Startup Alert
     alert_mgr.send_alert(
