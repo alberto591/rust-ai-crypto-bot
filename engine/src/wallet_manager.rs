@@ -8,7 +8,7 @@ use solana_sdk::{
 use spl_associated_token_account::instruction::create_associated_token_account;
 use spl_associated_token_account::get_associated_token_address;
 use solana_client::rpc_client::RpcClient;
-use std::error::Error;
+use anyhow::Result;
 
 pub(crate) struct WalletManager {
     rpc: RpcClient,
@@ -41,7 +41,7 @@ impl WalletManager {
     }
 
     /// Prepares WSOL by wrapping native SOL if balance is low.
-    pub fn sync_wsol(&self, payer: &Keypair, amount_lamports: u64) -> Result<Vec<Instruction>, Box<dyn Error>> {
+    pub fn sync_wsol(&self, payer: &Keypair, amount_lamports: u64) -> Result<Vec<Instruction>> {
         let wsol_mint = spl_token::native_mint::id();
         let ata = get_associated_token_address(&payer.pubkey(), &wsol_mint);
         
@@ -70,7 +70,7 @@ impl WalletManager {
 
     #[allow(dead_code)]
     /// Unwraps WSOL back to native SOL
-    pub fn unwrap_wsol(&self, payer: &Pubkey) -> Result<Instruction, Box<dyn Error>> {
+    pub fn unwrap_wsol(&self, payer: &Pubkey) -> Result<Instruction> {
         let wsol_mint = spl_token::native_mint::id();
         let ata = get_associated_token_address(payer, &wsol_mint);
 
@@ -85,12 +85,12 @@ impl WalletManager {
     }
 
     /// Get native SOL balance
-    pub fn get_sol_balance(&self, address: &Pubkey) -> Result<u64, Box<dyn Error>> {
+    pub fn get_sol_balance(&self, address: &Pubkey) -> Result<u64> {
         Ok(self.rpc.get_balance(address)?)
     }
 
     /// Get token balance for a given mint
-    pub fn get_token_balance(&self, owner: &Pubkey, mint: &Pubkey) -> Result<u64, Box<dyn Error>> {
+    pub fn get_token_balance(&self, owner: &Pubkey, mint: &Pubkey) -> Result<u64> {
         let ata = get_associated_token_address(owner, mint);
         match self.rpc.get_token_account_balance(&ata) {
             Ok(balance) => Ok(balance.amount.parse::<u64>().unwrap_or(0)),

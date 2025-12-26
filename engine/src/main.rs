@@ -159,6 +159,10 @@ async fn main() {
         None
     };
     let alert_mgr = Arc::new(alerts::AlertManager::new(bot_cfg.discord_webhook.clone(), telegram_config));
+    tracing::info!("🔔 Alerting configured: Discord={}, Telegram={}", 
+        bot_cfg.discord_webhook.is_some(),
+        bot_cfg.telegram_bot_token.is_some() && bot_cfg.telegram_chat_id.is_some()
+    );
 
     // 4.3.6 Initialize Telemetry
     telemetry::init_metrics();
@@ -191,7 +195,7 @@ async fn main() {
         performance_tracker,
         metrics,
         risk_mgr,
-        alert_mgr,
+        alert_mgr: Arc::clone(&alert_mgr),
     });
 
     // 4.5 Pre-flight Wallet Verification
@@ -405,6 +409,7 @@ async fn main() {
             _ = shutdown_rx.recv() => {
                 info!("👋 Engine shutting down gracefully...");
                 context.metrics.print_summary();
+                context.alert_mgr.send_final_report(Arc::clone(&context.metrics)).await;
                 info!("Goodbye!");
                 break;
             }

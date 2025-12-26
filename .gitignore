@@ -1,38 +1,20 @@
-# Rust build artifacts
-target/
+/target
+.env
+.env.backup
+.env.bak
+*.log
 Cargo.lock
-
-# Python
+test_run_*
+production_test_*
+data/
+bot.log
+simulation_*.log
+id.json
+keypair.json
 venv/
-__pycache__/
-*.py[cod]
-*$py.class
-.Python
-
-# Data files (keep examples, ignore collected data)
-data/*.csv
-!data/.gitkeep
-
-# Logs
-logs/*.log
-!logs/.gitkeep
-
-# Environment variables
-# .env
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# macOS
-.DS_Store
-
-# AI Model (large binary)
-*.onnx
-
-# Temporary files
-*.tmp
-*.bak
+Dynamic
+ai_model.onnx
+check_size.rs
+find_offsets.rs
+monitor_solusdc.rs
+EOF

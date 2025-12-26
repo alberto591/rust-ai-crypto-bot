@@ -121,6 +121,8 @@ impl AlertManager {
             
             if let Err(e) = self.client.post(webhook_url).json(&payload).send().await {
                 tracing::error!("Failed to send Discord alert: {}", e);
+            } else {
+                tracing::info!("✅ Discord alert dispatched successfully.");
             }
         }
         
@@ -144,10 +146,54 @@ impl AlertManager {
                 "parse_mode": "HTML",
             });
             
-            if let Err(e) = self.client.post(&url).json(&payload).send().await {
-                tracing::error!("Failed to send Telegram alert: {}", e);
+            match self.client.post(&url).json(&payload).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let err_text = resp.text().await.unwrap_or_default();
+                        tracing::error!("Telegram API error ({}): {}", status, err_text);
+                    } else {
+                        tracing::info!("✅ Telegram alert dispatched successfully.");
+                    }
+                }
+                Err(e) => tracing::error!("Failed to send Telegram alert: {}", e),
             }
         }
+    }
+
+    pub async fn send_final_report(&self, metrics: Arc<BotMetrics>) {
+        let detected = metrics.opportunities_detected.load(Ordering::Relaxed);
+        let jito_success = metrics.execution_jito_success.load(Ordering::Relaxed);
+        let rpc_success = metrics.execution_rpc_fallback_success.load(Ordering::Relaxed);
+        let total_executions = jito_success + rpc_success;
+        let exec_attempts = metrics.execution_attempts_total.load(Ordering::Relaxed);
+        
+        let profit = metrics.total_profit_lamports.load(Ordering::Relaxed);
+        let loss = metrics.total_loss_lamports.load(Ordering::Relaxed);
+        let net_pnl = (profit as i64 - loss as i64) as f64 / 1e9;
+
+        let success_rate = if exec_attempts > 0 {
+            (total_executions as f64 / exec_attempts as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let message = format!(
+            "Final Run Report:\n- Detected: {}\n- Executed: {} ({} Jito, {} RPC)\n- Net P&L: {:.4} SOL\n- Success Rate: {:.1}%",
+            detected, total_executions, jito_success, rpc_success, net_pnl, success_rate
+        );
+
+        self.send_alert(
+            AlertSeverity::Info,
+            "Engine Shutdown Summary",
+            &message,
+            vec![
+                Field { name: "Total PnL".to_string(), value: format!("{:.4} SOL", net_pnl), inline: true },
+                Field { name: "Success Rate".to_string(), value: format!("{:.1}%", success_rate), inline: true },
+                Field { name: "Attempts".to_string(), value: exec_attempts.to_string(), inline: true },
+                Field { name: "Executions".to_string(), value: total_executions.to_string(), inline: true },
+            ]
+        ).await;
     }
 }
 
@@ -162,9 +208,11 @@ pub async fn monitor_health(
     let mut last_processed_count = 0;
     let mut tick_count: u32 = 0;
     
+    tracing::info!("🩺 Health monitor started (interval: 5m, report: 30m)");
     loop {
         interval.tick().await;
         tick_count += 1;
+        tracing::debug!("🩺 Health monitor tick: {}", tick_count);
         
         let detected = metrics.opportunities_detected.load(Ordering::Relaxed);
         let jito_success = metrics.execution_jito_success.load(Ordering::Relaxed);
@@ -213,16 +261,18 @@ pub async fn monitor_health(
             }
         }
 
-        // 4. Hourly Summary (using a modulo or simple counter)
-        // Since we run every 5 mins, index 12 is roughly 1 hour
-        if tick_count % 12 == 0 {
+        // 4. 30-Minute Summary (using a modulo or simple counter)
+        // Since we run every 5 mins, index 6 is 30 mins.
+        // Also send immediately on tick 1 (startup)
+        if tick_count == 1 || tick_count % 6 == 0 {
             let message = format!(
-                "Hourly Status Report:\n- Detected: {}\n- Executed: {} ({} Jito, {} RPC)\n- Net P&L: {:.4} SOL",
+                "30-Minute Status Report:\n- Detected: {}\n- Executed: {} ({} Jito, {} RPC)\n- Net P&L: {:.4} SOL",
                 detected, total_executions, jito_success, rpc_success, net_pnl
             );
+            tracing::info!("📊 Sending 30-minute performance report to Discord/Telegram...");
             alerts.send_alert(
                 AlertSeverity::Success,
-                "Hourly Performance Summary",
+                "30-Minute Performance Summary",
                 &message,
                 vec![
                     Field { name: "PnL".to_string(), value: format!("{:.4} SOL", net_pnl), inline: true },
