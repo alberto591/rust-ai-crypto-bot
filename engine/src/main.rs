@@ -473,7 +473,7 @@ async fn main() {
                 }
 
                 let start_time = std::time::Instant::now();
-                match ctx.engine.process_event(
+                let processing_result = ctx.engine.process_event(
                     domain_update, 
                     ctx.config.default_trade_size_lamports,
                     ctx.config.jito_tip_lamports,
@@ -484,10 +484,13 @@ async fn main() {
                     ctx.config.max_slippage_ceiling,
                     ctx.config.min_profit_threshold_lamports,
                     ctx.config.ai_confidence_threshold
-                ).await {
+                ).await;
+                
+                let duration = start_time.elapsed().as_millis() as f64;
+                telemetry::DETECTION_LATENCY.observe(duration);
+
+                match processing_result {
                     Ok(Some(opportunity)) => {
-                        let duration = start_time.elapsed().as_millis() as f64;
-                        telemetry::DETECTION_LATENCY.observe(duration);
                         telemetry::OPPORTUNITIES_TOTAL.inc();
                         telemetry::OPPORTUNITIES_PROFITABLE.inc();
                         
