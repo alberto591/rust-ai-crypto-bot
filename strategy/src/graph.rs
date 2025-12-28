@@ -82,24 +82,10 @@ impl MarketGraph {
     /// Calculates how much 'to_token' you get for 'amount_in'
     pub fn get_amount_out(&self, edge: &Edge, amount_in: u64) -> u64 {
         if edge.program_id == mev_core::constants::ORCA_WHIRLPOOL_PROGRAM {
-            // Orca CLMM Implementation (using virtual reserves from sqrt_price for HFT speed)
-            // Note: In production, full tick-math should be used. 
-            // For triangular/cross-dex discovery, virtual reserves are a high-speed approximation.
             if let Some(price_sqrt) = edge.price_sqrt {
-                let price = (price_sqrt as f64 / (1u128 << 64) as f64).powi(2);
-                let amount_in_f = amount_in as f64;
-                
-                // dy = dx * price (with fee)
-                let fee = edge.fee_numerator as f64 / edge.fee_denominator as f64;
-                let amount_in_with_fee = amount_in_f * (1.0 - fee);
-                
-                return if edge.reserve_in > edge.reserve_out {
-                     // Trading A for B
-                     (amount_in_with_fee * price) as u64
-                } else {
-                     // Trading B for A
-                     (amount_in_with_fee / price) as u64
-                };
+                let liquidity = edge.liquidity.unwrap_or(0);
+                let a_to_b = edge.reserve_in > edge.reserve_out; // Heuristic for direction in graph
+                return mev_core::math::get_amount_out_clmm(amount_in, price_sqrt, liquidity, edge.fee_numerator as u128 as u16, a_to_b);
             }
             0
         } else {
@@ -120,7 +106,6 @@ impl MarketGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     #[test]
     fn test_graph_update_and_calc() {

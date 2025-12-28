@@ -6,8 +6,10 @@ pub struct BotMetrics {
     // Opportunity tracking
     pub opportunities_detected: AtomicU64,
     pub opportunities_profitable: AtomicU64,
-    pub opportunities_rejected_profit_sanity: AtomicU64,  // NEW
-    pub opportunities_rejected_safety: AtomicU64,         // NEW
+    pub opportunities_rejected_profit_sanity: AtomicU64,
+    pub opportunities_rejected_safety: AtomicU64,
+    pub opportunities_rejected_rug: AtomicU64,      // NEW: V2
+    pub opportunities_rejected_slippage: AtomicU64, // NEW: V2
     
     // Execution tracking - NEW SECTION
     pub execution_attempts_total: AtomicU64,
@@ -41,6 +43,9 @@ pub struct BotMetrics {
     // Health tracking
     pub websocket_reconnects: AtomicU32,
     pub rpc_errors: AtomicU32,
+    
+    // Remote Control State - NEW: V2
+    pub is_paused: std::sync::atomic::AtomicBool, 
 }
 
 impl strategy::ports::TelemetryPort for BotMetrics {
@@ -52,6 +57,12 @@ impl strategy::ports::TelemetryPort for BotMetrics {
     }
     fn log_safety_rejection(&self) {
         self.log_safety_rejection();
+    }
+    fn log_rug_rejection(&self) {
+        self.log_rug_rejection();
+    }
+    fn log_slippage_rejection(&self) {
+        self.log_slippage_rejection();
     }
     fn log_execution_attempt(&self) {
         self.log_execution_attempt();
@@ -77,6 +88,27 @@ impl strategy::ports::TelemetryPort for BotMetrics {
     fn log_endpoint_success(&self, endpoint_index: usize) {
         self.log_endpoint_success(endpoint_index);
     }
+    fn log_realized_pnl(&self, lamports: i64) {
+        if lamports > 0 {
+            self.total_profit_lamports.fetch_add(lamports as u64, Ordering::SeqCst);
+        } else if lamports < 0 {
+            self.total_loss_lamports.fetch_add(lamports.abs() as u64, Ordering::SeqCst);
+        }
+    }
+
+    fn get_total_loss(&self) -> u64 {
+        self.total_loss_lamports.load(Ordering::SeqCst)
+    }
+
+    fn get_win_rate(&self) -> f32 {
+        let attempts = self.execution_attempts_total.load(Ordering::Relaxed) as f32;
+        let success = (self.execution_jito_success.load(Ordering::Relaxed) + self.execution_rpc_fallback_success.load(Ordering::Relaxed)) as f32;
+        if attempts > 0.0 {
+            success / attempts
+        } else {
+            1.0 // Assume 100% win rate if no trades made yet to avoid aggressive scaling down
+        }
+    }
 }
 
 impl BotMetrics {
@@ -87,6 +119,8 @@ impl BotMetrics {
             opportunities_profitable: AtomicU64::new(0),
             opportunities_rejected_profit_sanity: AtomicU64::new(0),
             opportunities_rejected_safety: AtomicU64::new(0),
+            opportunities_rejected_rug: AtomicU64::new(0),      // NEW: V2
+            opportunities_rejected_slippage: AtomicU64::new(0), // NEW: V2
             
             // Execution tracking
             execution_attempts_total: AtomicU64::new(0),
@@ -120,6 +154,9 @@ impl BotMetrics {
             // Health tracking
             websocket_reconnects: AtomicU32::new(0),
             rpc_errors: AtomicU32::new(0),
+            
+            // Remote Control
+            is_paused: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -136,6 +173,14 @@ impl BotMetrics {
     
     pub fn log_safety_rejection(&self) {
         self.opportunities_rejected_safety.fetch_add(1, Ordering::Relaxed);
+    }
+    
+    pub fn log_rug_rejection(&self) {
+        self.opportunities_rejected_rug.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn log_slippage_rejection(&self) {
+        self.opportunities_rejected_slippage.fetch_add(1, Ordering::Relaxed);
     }
     
     // NEW: Execution tracking methods
@@ -243,8 +288,6 @@ impl BotMetrics {
         let exec_total = self.execution_attempts_total.load(Ordering::Relaxed);
         let jito_ok = self.execution_jito_success.load(Ordering::Relaxed);
         let rpc_ok = self.execution_rpc_fallback_success.load(Ordering::Relaxed);
-        let profit = self.total_profit_lamports.load(Ordering::Relaxed) as f64 / 1e9;
-        let loss = self.total_loss_lamports.load(Ordering::Relaxed) as f64 / 1e9;
         let net = (self.total_profit_lamports.load(Ordering::Relaxed) as i64 
                   - self.total_loss_lamports.load(Ordering::Relaxed) as i64) as f64 / 1e9;
 

@@ -67,6 +67,48 @@ impl AmmInfo {
     }
 }
 
+/// Serum V3 / OpenBook Market Layout (388 bytes)
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct MarketStateV3 {
+    pub data: [u8; 388],
+}
+
+unsafe impl Zeroable for MarketStateV3 {}
+unsafe impl Pod for MarketStateV3 {}
+
+impl MarketStateV3 {
+    #[inline(always)]
+    pub fn bids(&self) -> Pubkey {
+        Pubkey::new_from_array(self.data[285..317].try_into().unwrap())
+    }
+
+    #[inline(always)]
+    pub fn asks(&self) -> Pubkey {
+        Pubkey::new_from_array(self.data[317..349].try_into().unwrap())
+    }
+
+    #[inline(always)]
+    pub fn event_queue(&self) -> Pubkey {
+        Pubkey::new_from_array(self.data[253..285].try_into().unwrap())
+    }
+
+    #[inline(always)]
+    pub fn coin_vault(&self) -> Pubkey {
+        Pubkey::new_from_array(self.data[117..149].try_into().unwrap())
+    }
+
+    #[inline(always)]
+    pub fn pc_vault(&self) -> Pubkey {
+        Pubkey::new_from_array(self.data[165..197].try_into().unwrap())
+    }
+
+    #[inline(always)]
+    pub fn vault_signer_nonce(&self) -> u32 {
+        u32::from_le_bytes(self.data[45..49].try_into().unwrap())
+    }
+}
+
 /// All account keys required for a Raydium V4 swap
 /// Order is CRITICAL - must match Raydium program expectations exactly
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -97,31 +139,27 @@ mod tests {
 
     #[test]
     fn test_amm_info_decoding() {
-        // Create a dummy byte array of the correct size (at least 752 bytes for a full V4 layout, 
-        // but AmmInfo as defined is ~456 bytes + scaling)
-        let mut data = vec![0u8; std::mem::size_of::<AmmInfo>()];
-        
-        let mut amm = AmmInfo::zeroed();
-        amm.status = 1;
-        amm.base_decimals = 9;
-        amm.quote_decimals = 6;
-        amm.base_reserve = 1000 * 10u64.pow(9); // 1000 SOL
-        amm.quote_reserve = 20000 * 10u64.pow(6); // 20000 USDC
-        
-        // Copy struct bytes to data
-        let bytes = bytemuck::bytes_of(&amm);
-        data[..bytes.len()].copy_from_slice(bytes);
-        
-        // Decode back
-        let decoded = bytemuck::try_from_bytes::<AmmInfo>(&data).unwrap();
-        
-        assert_eq!(decoded.status, 1);
-        assert_eq!(decoded.base_reserve, 1000 * 10u64.pow(9));
-        
-        // Test price calculation logic
-        let price = (decoded.quote_reserve as f64 / 10f64.powi(decoded.quote_decimals as i32)) /
-                    (decoded.base_reserve as f64 / 10f64.powi(decoded.base_decimals as i32));
-        
+        // Create a dummy byte array of the correct size
+        let mut data = [0u8; 752];
+
+        // Set base_reserve at offset 720..728 (little endian)
+        let base_reserve = 1000u64 * 10u64.pow(9); // 1000 SOL
+        data[720..728].copy_from_slice(&base_reserve.to_le_bytes());
+
+        // Set quote_reserve at offset 728..736
+        let quote_reserve = 20000u64 * 10u64.pow(6); // 20000 USDC
+        data[728..736].copy_from_slice(&quote_reserve.to_le_bytes());
+
+        // Decode
+        let decoded = AmmInfo { data };
+
+        assert_eq!(decoded.base_reserve(), base_reserve);
+        assert_eq!(decoded.quote_reserve(), quote_reserve);
+
+        // Test price calculation logic (assuming 9 decimals for base, 6 for quote)
+        let price = (decoded.quote_reserve() as f64 / 10f64.powi(6)) /
+                    (decoded.base_reserve() as f64 / 10f64.powi(9));
+
         assert_eq!(price, 20.0);
     }
 }

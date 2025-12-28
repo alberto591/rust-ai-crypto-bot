@@ -38,20 +38,20 @@ impl TokenSafetyChecker {
         }
     }
 
-    pub async fn is_safe_to_trade(&self, mint: &Pubkey, pool_id: &Pubkey) -> bool {
+    pub async fn is_safe_to_trade(&self, mint: &Pubkey, pool_id: &Pubkey) -> Result<bool, Box<dyn Error>> {
         // SHORT-CIRCUIT: Whitelist check first (known-safe stablecoins)
         if self.whitelist.contains(mint) {
             debug!("✅ Token {} is whitelisted. Skipping safety checks.", mint);
-            return true;
+            return Ok(true);
         }
 
         if self.blacklist.contains_key(mint) || self.blacklist.contains_key(pool_id) {
-            return false;
+            return Ok(false);
         }
 
         if let Some(timestamp_ref) = self.safe_cache.get(mint) {
             if (*timestamp_ref).elapsed() < std::time::Duration::from_secs(3600) {
-                return true; 
+                return Ok(true);
             }
         }
 
@@ -67,7 +67,7 @@ impl TokenSafetyChecker {
             self.blacklist.insert(*pool_id, std::time::Instant::now());
         }
 
-        is_safe
+        Ok(is_safe)
     }
 
     async fn run_deep_validation(&self, mint: &Pubkey, pool_id: &Pubkey) -> bool {

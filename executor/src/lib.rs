@@ -5,3 +5,5 @@ pub mod jito;             // ✅ Jito bundle executor
 
 #[cfg(test)]
 mod jito_resilience_tests;
+#[cfg(test)]
+mod orca_tests;

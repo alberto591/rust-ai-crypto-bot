@@ -20,6 +20,12 @@ This directory contains all architectural decisions made for the Solana MEV Arbi
 | [ADR-012](./ADR-012-real-time-websocket-market-listener.md) | Real-time WebSocket Market Listener | Accepted | 2025-12-22 |
 | [ADR-013](./ADR-013-lazy-pool-key-fetching-and-caching.md) | Lazy Pool Key Fetching & Caching | Accepted | 2025-12-22 |
 | [ADR-014](./ADR-014-comprehensive-unit-testing-strategy.md) | Comprehensive Unit Testing Strategy | Accepted | 2025-12-22 |
+| [ADR-015](./ADR-015-dev-to-mainnet-test-plan.md) | Devnet to Mainnet Transition Test Plan | Accepted | 2025-12-23 |
+| [ADR-016](./ADR-016-async-safety-performance-tracking.md) | Async Safety & Performance Tracking | Accepted | 2025-12-23 |
+| [ADR-017](./ADR-017-graduated-risk-profitability-framework.md) | Graduated Risk & Profitability Framework | Accepted | 2025-12-23 |
+| [ADR-018](./ADR-018-production-readiness-roadmap.md) | Production Readiness Roadmap | Accepted | 2025-12-23 |
+| [ADR-019](./ADR-019-success-library-postgresql-feedback-loop.md) | Success Library & Feedback Loop | Accepted | 2025-12-27 |
+| [ADR-020](./ADR-020-operations-usage-guide.md) | MEV Bot Operations & Usage Guide | Accepted | 2025-12-27 |
 
 ## ADR Process
 
@@ -83,6 +89,11 @@ Create an ADR when making decisions about:
 ### AI & ML
 - ADR-004: AI Model Integration with ONNX
 - ADR-006: Data Collection for AI Training
+- ADR-015: Devnet to Mainnet Transition Test Plan
+- ADR-016: Async Safety & Performance Tracking
+- ADR-017: Graduated Risk & Profitability Framework
+- ADR-018: Production Readiness Roadmap
+- ADR-019: Success Library & Feedback Loop
 
 ### Infrastructure
 - ADR-005: Jito Bundle Execution

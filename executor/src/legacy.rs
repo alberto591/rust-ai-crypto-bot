@@ -18,7 +18,6 @@ pub struct LegacyExecutor {
     payer: solana_sdk::signature::Keypair,
     payer_pubkey: solana_sdk::pubkey::Pubkey,
     key_provider: Option<std::sync::Arc<dyn strategy::ports::PoolKeyProvider>>,
-    telemetry: Option<std::sync::Arc<dyn strategy::ports::TelemetryPort>>,
 }
 
 impl LegacyExecutor {
@@ -30,17 +29,16 @@ impl LegacyExecutor {
     /// # Returns
     /// Configured executor with confirmed commitment level
     pub fn new(
-        rpc_url: &str, 
+        rpc_url: &str,
         payer: solana_sdk::signature::Keypair,
         key_provider: Option<std::sync::Arc<dyn strategy::ports::PoolKeyProvider>>,
-        telemetry: Option<std::sync::Arc<dyn strategy::ports::TelemetryPort>>,
     ) -> Self {
         let client = RpcClient::new_with_commitment(
             rpc_url.to_string(),
             CommitmentConfig::confirmed(),
         );
         let payer_pubkey = payer.pubkey();
-        Self { client, payer, payer_pubkey, key_provider, telemetry }
+        Self { client, payer, payer_pubkey, key_provider }
     }
 
     /// Execute a standard transaction via RPC

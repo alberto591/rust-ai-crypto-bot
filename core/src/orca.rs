@@ -62,8 +62,7 @@ impl Whirlpool {
     /// Calculate the current price in the pool (quote/base)
     /// For concentrated liquidity, price = (sqrt_price / 2^64)^2
     pub fn calculate_price(&self) -> f64 {
-        let sqrt_price = self.sqrt_price();
-        let sqrt_price_f64 = sqrt_price as f64 / (1u128 << 64) as f64;
+        let sqrt_price_f64 = self.sqrt_price() as f64 / (1u128 << 64) as f64;
         sqrt_price_f64 * sqrt_price_f64
     }
 
@@ -98,6 +97,21 @@ impl Whirlpool {
         
         Ok(amount_out)
     }
+
+    pub fn to_pool_update(&self, pool_address: Pubkey, program_id: Pubkey, timestamp: u64) -> crate::PoolUpdate {
+        crate::PoolUpdate {
+            pool_address,
+            program_id,
+            mint_a: self.token_mint_a(),
+            mint_b: self.token_mint_b(),
+            reserve_a: 0, // Not used for CLMM
+            reserve_b: 0, // Not used for CLMM
+            price_sqrt: Some(self.sqrt_price()),
+            liquidity: Some(self.liquidity()),
+            fee_bps: self.fee_rate(), // Orca fee_rate is in bps
+            timestamp,
+        }
+    }
 }
 
 #[repr(C)]
@@ -131,8 +145,7 @@ impl OrcaSwapKeys {
 
     pub fn get_tick_array_start_index(tick_index: i32, tick_spacing: u16) -> i32 {
         let ticks_in_array = Self::TICKS_PER_ARRAY * tick_spacing as i32;
-        let start_index = ((tick_index as f64 / ticks_in_array as f64).floor() as i32) * ticks_in_array;
-        start_index
+        ((tick_index as f64 / ticks_in_array as f64).floor() as i32) * ticks_in_array
     }
 
     pub fn derive_tick_array_pda(
@@ -153,3 +166,85 @@ impl OrcaSwapKeys {
 }
 
 use serde::{Serialize, Deserialize};
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_whirlpool_layout_exhaustive() {
+        let mut data = [0u8; 653];
+        
+        // Mocking values based on official Whirlpool layout
+        // https://github.com/orca-so/whirlpools/blob/main/programs/whirlpool/src/state/whirlpool.rs
+        
+        let liquidity: u128 = 100_000_000_000;
+        data[49..65].copy_from_slice(&liquidity.to_le_bytes());
+        
+        let sqrt_price: u128 = 18446744073709551616; // 1.0 in X64
+        data[65..81].copy_from_slice(&sqrt_price.to_le_bytes());
+        
+        let tick_current_index: i32 = -450;
+        data[81..85].copy_from_slice(&tick_current_index.to_le_bytes());
+        
+        let tick_spacing: u16 = 64;
+        data[41..43].copy_from_slice(&tick_spacing.to_le_bytes());
+        
+        let fee_rate: u16 = 3000; // 30 bps
+        data[45..47].copy_from_slice(&fee_rate.to_le_bytes());
+        
+        let mint_a = Pubkey::new_unique();
+        data[101..133].copy_from_slice(&mint_a.to_bytes());
+        
+        let mint_b = Pubkey::new_unique();
+        data[181..213].copy_from_slice(&mint_b.to_bytes());
+        
+        let vault_a = Pubkey::new_unique();
+        data[133..165].copy_from_slice(&vault_a.to_bytes());
+        
+        let vault_b = Pubkey::new_unique();
+        data[213..245].copy_from_slice(&vault_b.to_bytes());
+
+        let whirlpool: &Whirlpool = bytemuck::from_bytes(&data);
+        
+        assert_eq!(whirlpool.liquidity(), liquidity);
+        assert_eq!(whirlpool.sqrt_price(), sqrt_price);
+        assert_eq!(whirlpool.tick_current_index(), tick_current_index);
+        assert_eq!(whirlpool.tick_spacing(), tick_spacing);
+        assert_eq!(whirlpool.fee_rate(), fee_rate);
+        assert_eq!(whirlpool.token_mint_a(), mint_a);
+        assert_eq!(whirlpool.token_mint_b(), mint_b);
+        assert_eq!(whirlpool.token_vault_a(), vault_a);
+        assert_eq!(whirlpool.token_vault_b(), vault_b);
+        
+        // Verify math helpers
+        assert_eq!(whirlpool.calculate_price(), 1.0);
+    }
+
+    #[test]
+    fn test_tick_array_math() {
+        // Test case: current_tick = -450, spacing = 64
+        // TICKS_PER_ARRAY = 88
+        // ticks_in_array = 88 * 64 = 5632
+        // start_index = floor(-450 / 5632) * 5632 = -1 * 5632 = -5632
+        let start = OrcaSwapKeys::get_tick_array_start_index(-450, 64);
+        assert_eq!(start, -5632);
+        
+        // Test case: current_tick = 6000, spacing = 64
+        // floor(6000 / 5632) * 5632 = 1 * 5632 = 5632
+        let start_pos = OrcaSwapKeys::get_tick_array_start_index(6000, 64);
+        assert_eq!(start_pos, 5632);
+
+        // Test case: current_tick = 500, spacing = 64
+        // floor(500 / 5632) * 5632 = 0 * 5632 = 0
+        let start_zero = OrcaSwapKeys::get_tick_array_start_index(500, 64);
+        assert_eq!(start_zero, 0);
+    }
+
+    #[test]
+    fn test_pda_derivation_smoke() {
+        let pool = Pubkey::new_unique();
+        let program = crate::constants::ORCA_WHIRLPOOL_PROGRAM;
+        let pda = OrcaSwapKeys::derive_tick_array_pda(&pool, -5632, &program);
+        assert!(pda != Pubkey::default());
+    }
+}

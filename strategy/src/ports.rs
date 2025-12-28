@@ -61,6 +61,8 @@ pub trait TelemetryPort: Send + Sync {
     fn log_opportunity(&self, profitable: bool);
     fn log_profit_sanity_rejection(&self);
     fn log_safety_rejection(&self);
+    fn log_rug_rejection(&self);
+    fn log_slippage_rejection(&self);
     fn log_execution_attempt(&self);
     fn log_jito_success(&self);
     fn log_jito_failed(&self);
@@ -69,4 +71,21 @@ pub trait TelemetryPort: Send + Sync {
     fn log_retry_success(&self, retry_number: usize);
     fn log_endpoint_attempt(&self, endpoint_index: usize);
     fn log_endpoint_success(&self, endpoint_index: usize);
+    fn log_realized_pnl(&self, lamports: i64);
+    
+    // Getters for Risk Management
+    fn get_total_loss(&self) -> u64;
+    fn get_win_rate(&self) -> f32;
+}
+
+#[async_trait::async_trait]
+pub trait MarketIntelligencePort: Send + Sync {
+    /// Check if a token address is a known false positive or blacklisted
+    async fn is_blacklisted(&self, token_address: &Pubkey) -> Result<bool>;
+
+    /// Get high-level analysis of success stories (the "Success DNA")
+    async fn get_success_analysis(&self) -> Result<mev_core::SuccessAnalysis>;
+
+    /// Check if a token matching specific DNA traits should be traded
+    async fn match_dna(&self, dna: &mev_core::TokenDNA) -> Result<bool>;
 }

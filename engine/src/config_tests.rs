@@ -2,6 +2,7 @@
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+    use crate::config::BotConfig;
     use std::env;
 
     #[test]

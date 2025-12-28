@@ -1,0 +1,51 @@
+{
+  "strategy_id": "momentum_sniper_v1",
+  "token_address": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "market_context": "Meme_Season_Discovery",
+  "entry_triggers": {
+    "liquidity_min": 15000,
+    "has_twitter": true,
+    "mint_renounced": true,
+    "initial_market_cap": 50000
+  },
+  "performance": {
+    "peak_roi": 450.0,
+    "time_to_peak_secs": 840,
+    "drawdown": 12.0
+  },
+  "lesson": "High early engagement; liquidity lock verified.",
+  "timestamp": 1766834809
+}

@@ -1,0 +1,21 @@
+#!/usr/bin/expect -f
+set timeout 120
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+# 1. Transfer the service and launch script
+spawn scp -o StrictHostKeyChecking=no scripts/solana-bot.service scripts/launch_production.sh root@$ip:/root/solana-mev-bot/scripts/
+expect "password:"
+send "$password\r"
+expect eof
+
+# 2. Make launch script executable and run it (After confirming build is done)
+spawn ssh -o StrictHostKeyChecking=no root@$ip "cd /root/solana-mev-bot && chmod +x scripts/launch_production.sh && ls -l target/release/engine && ./scripts/launch_production.sh"
+expect "password:"
+send "$password\r"
+
+expect {
+    "Production Launch Complete!" { exit 0 }
+    timeout { exit 1 }
+    eof { exit 0 }
+}

@@ -10,7 +10,7 @@ use spl_associated_token_account::get_associated_token_address;
 use solana_client::rpc_client::RpcClient;
 use anyhow::Result;
 
-pub(crate) struct WalletManager {
+pub struct WalletManager {
     rpc: RpcClient,
 }
 

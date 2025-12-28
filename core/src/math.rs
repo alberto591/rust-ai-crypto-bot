@@ -48,28 +48,35 @@ pub fn calculate_effective_price(
 pub fn get_amount_out_clmm(
     amount_in: u64,
     sqrt_price_x64: u128,
-    _liquidity: u128, // Currently using price-based approximation for speed
+    liquidity: u128,
     fee_bps: u16,
     a_to_b: bool,
 ) -> u64 {
-    if amount_in == 0 || sqrt_price_x64 == 0 {
+    if amount_in == 0 || sqrt_price_x64 == 0 || liquidity == 0 {
         return 0;
     }
 
-    // Convert X64 sqrt price to price
-    // Price = (sqrt_price / 2^64)^2  (This is token_b / token_a)
+    // 1. Calculate Virtual Reserves
+    // L = sqrt(x * y), sqrt_p = sqrt(y / x)
+    // x = L / sqrt_p, y = L * sqrt_p
     let sqrt_p = sqrt_price_x64 as f64 / (1u128 << 64) as f64;
-    let price = if a_to_b {
-        sqrt_p * sqrt_p
+    
+    let (v_res_in, v_res_out) = if a_to_b {
+        // Selling A for B: res_in = x, res_out = y
+        (liquidity as f64 / sqrt_p, liquidity as f64 * sqrt_p)
     } else {
-        1.0 / (sqrt_p * sqrt_p)
+        // Selling B for A: res_in = y, res_out = x
+        (liquidity as f64 * sqrt_p, liquidity as f64 / sqrt_p)
     };
 
+    // 2. Apply CPMM formula on virtual reserves
+    let amount_in_f = amount_in as f64;
     let fee_multiplier = 1.0 - (fee_bps as f64 / 10000.0);
-    let amount_in_with_fee = amount_in as f64 * fee_multiplier;
+    let amount_in_with_fee = amount_in_f * fee_multiplier;
 
-    // dy = dx * price
-    (amount_in_with_fee * price) as u64
+    let amount_out = (amount_in_with_fee * v_res_out) / (v_res_in + amount_in_with_fee);
+    
+    amount_out as u64
 }
 
 #[cfg(test)]
@@ -100,10 +107,20 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_price() {
-        let amount_in = 1_000_000u64;
-        let amount_out = 950_000u64;
-        let price = calculate_effective_price(amount_in, amount_out);
-        assert_eq!(price, 0.95);
+    fn test_clmm_math_accurate() {
+        let amount_in = 1_000_000u64; // 1 USDC
+        let sqrt_price_x64: u128 = 18446744073709551616; // 1.0
+        let liquidity: u128 = 1_000_000_000;
+        let fee_bps = 30;
+
+        // With 1.0 price and low liquidity, impact should be visible
+        let amount_out = get_amount_out_clmm(amount_in, sqrt_price_x64, liquidity, fee_bps, true);
+        
+        // Price approx 1.0. 
+        // Fee A: 1,000,000 * 0.997 = 997,000
+        // Virtual Reserves: x = 1B, y = 1B
+        // dy = (1B * 997k) / (1B + 997k) = 996,000ish
+        assert!(amount_out < 997_000);
+        assert!(amount_out > 990_000);
     }
 }

@@ -29,7 +29,7 @@ mod hft_tests {
             fee_bps: 30,
             timestamp: 0,
         };
-        strategy.process_update(update.clone(), 1_000_000_000);
+        strategy.process_update(Arc::new(update.clone()), 1_000_000_000);
 
 
         // Spawn 10 concurrent readers
@@ -40,7 +40,7 @@ mod hft_tests {
             
             handles.push(thread::spawn(move || {
                 // Read operation should not block other reads
-                strategy_clone.process_update(update_clone, 1_000_000_000)
+                strategy_clone.process_update(Arc::new(update_clone), 1_000_000_000)
             }));
         }
 
@@ -73,7 +73,7 @@ mod hft_tests {
                 fee_bps: 0,
                 timestamp: 0,
             };
-            strategy.process_update(update, 1_000_000_000);
+            strategy.process_update(Arc::new(update), 1_000_000_000);
 
         }
 
@@ -91,7 +91,7 @@ mod hft_tests {
             timestamp: 0,
         };
         
-        let opp = strategy.process_update(final_update, 1_000_000_000);
+        let opp = strategy.process_update(Arc::new(final_update), 1_000_000_000);
 
         // 5 hops at zero fees with slight profit should complete
         assert!(opp.is_some(), "Should find profitable cycle");
@@ -161,7 +161,7 @@ mod hft_tests {
                     timestamp: 0,
                 };
                 
-                strategy_clone.process_update(update, 1_000_000_000)
+                strategy_clone.process_update(Arc::new(update), 1_000_000_000)
             }));
 
         }

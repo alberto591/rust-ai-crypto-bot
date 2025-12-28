@@ -1,0 +1,21 @@
+#!/usr/bin/expect -f
+set timeout 600
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+# 1. Transfer the zip
+spawn scp -o StrictHostKeyChecking=no prod_build.zip root@$ip:/root/prod_build.zip
+expect "password:"
+send "$password\r"
+expect eof
+
+# 2. Unpack and run setup
+spawn ssh -o StrictHostKeyChecking=no root@$ip "apt update && apt install -y unzip && mkdir -p /root/solana-mev-bot && unzip -o /root/prod_build.zip -d /root/solana-mev-bot && cd /root/solana-mev-bot && chmod +x scripts/setup_vultr.sh && ./scripts/setup_vultr.sh"
+expect "password:"
+send "$password\r"
+
+expect {
+    "Setup Complete!" { exit 0 }
+    timeout { exit 1 }
+    eof { exit 0 }
+}

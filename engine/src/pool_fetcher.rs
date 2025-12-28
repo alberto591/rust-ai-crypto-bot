@@ -49,6 +49,24 @@ impl PoolKeyFetcher {
         let program_id = mev_core::constants::RAYDIUM_V4_PROGRAM;
         let (authority, _) = Pubkey::find_program_address(&[&b"amm authority"[..]], &program_id);
 
+        // Fetch Serum Market account to get Bids, Asks, Event Queue, and Vaults
+        let market_id = amm_info.market_id();
+        let market_account = self.rpc.get_account(&market_id)?;
+        if market_account.data.len() < 388 {
+            return Err("Serum market account data too small".into());
+        }
+        let market_state: &mev_core::raydium::MarketStateV3 = bytemuck::try_from_bytes(&market_account.data[..388])
+            .map_err(|_| "Failed to cast Serum market data layout")?;
+
+        let serum_program_id = amm_info.market_program_id();
+        let vault_signer = Pubkey::create_program_address(
+            &[
+                &market_id.to_bytes(),
+                &u64::from(market_state.vault_signer_nonce()).to_le_bytes(),
+            ],
+            &serum_program_id,
+        ).map_err(|_| "Failed to derive Serum vault signer")?;
+
         Ok(RaydiumSwapKeys {
             amm_id: *pool_id,
             amm_authority: authority,
@@ -56,14 +74,14 @@ impl PoolKeyFetcher {
             amm_target_orders: amm_info.target_orders(),
             amm_coin_vault: amm_info.base_vault(),
             amm_pc_vault: amm_info.quote_vault(),
-            serum_program_id: amm_info.market_program_id(),
-            serum_market: amm_info.market_id(),
-            serum_bids: Pubkey::new_unique(), 
-            serum_asks: Pubkey::new_unique(), 
-            serum_event_queue: Pubkey::new_unique(), 
-            serum_coin_vault: Pubkey::new_unique(), 
-            serum_pc_vault: Pubkey::new_unique(), 
-            serum_vault_signer: Pubkey::new_unique(), 
+            serum_program_id,
+            serum_market: market_id,
+            serum_bids: market_state.bids(),
+            serum_asks: market_state.asks(),
+            serum_event_queue: market_state.event_queue(),
+            serum_coin_vault: market_state.coin_vault(),
+            serum_pc_vault: market_state.pc_vault(),
+            serum_vault_signer: vault_signer,
             user_source_token_account: Pubkey::default(),
             user_dest_token_account: Pubkey::default(),
             user_owner: Pubkey::default(),
@@ -82,19 +100,37 @@ impl PoolKeyFetcher {
         let whirlpool: &Whirlpool = bytemuck::try_from_bytes(&account.data[..653])
             .map_err(|_| "Failed to cast Orca data layout")?;
 
+        let tick_spacing = whirlpool.tick_spacing();
+        let current_tick = whirlpool.tick_current_index();
+        let program_id = mev_core::constants::ORCA_WHIRLPOOL_PROGRAM;
+
+        // Derive Tick Arrays (Current, Previous, Next)
+        let start_index_0 = OrcaSwapKeys::get_tick_array_start_index(current_tick, tick_spacing);
+        let ticks_in_array = OrcaSwapKeys::TICKS_PER_ARRAY * tick_spacing as i32;
+        
+        let tick_array_0 = OrcaSwapKeys::derive_tick_array_pda(pool_id, start_index_0, &program_id);
+        let tick_array_1 = OrcaSwapKeys::derive_tick_array_pda(pool_id, start_index_0 - ticks_in_array, &program_id);
+        let tick_array_2 = OrcaSwapKeys::derive_tick_array_pda(pool_id, start_index_0 + ticks_in_array, &program_id);
+
+        // Derive Oracle PDA
+        let (oracle, _) = Pubkey::find_program_address(
+            &[b"oracle", pool_id.as_ref()],
+            &program_id
+        );
+
         Ok(OrcaSwapKeys {
             whirlpool: *pool_id,
             mint_a: whirlpool.token_mint_a(),
             mint_b: whirlpool.token_mint_b(),
-            token_authority: Pubkey::from_str("758n9M7oXJ6Y9n6n9n6n9n6n9n6n9n6n9n6n9n6n9n6").unwrap_or_default(), // Placeholder
-            token_owner_account_a: Pubkey::default(),
+            token_authority: Pubkey::default(), // Will be set by executor to payer
+            token_owner_account_a: Pubkey::default(), // Will be set by executor
             token_vault_a: whirlpool.token_vault_a(),
-            token_owner_account_b: Pubkey::default(),
+            token_owner_account_b: Pubkey::default(), // Will be set by executor
             token_vault_b: whirlpool.token_vault_b(),
-            tick_array_0: Pubkey::default(),
-            tick_array_1: Pubkey::default(),
-            tick_array_2: Pubkey::default(),
-            oracle: Pubkey::default(),
+            tick_array_0,
+            tick_array_1,
+            tick_array_2,
+            oracle,
         })
     }
 }

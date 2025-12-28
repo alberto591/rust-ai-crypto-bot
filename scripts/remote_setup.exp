@@ -1,0 +1,15 @@
+#!/usr/bin/expect -f
+set timeout 1800
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+spawn ssh -o StrictHostKeyChecking=no root@$ip "git clone https://github.com/lycanbeats/solana-mev-bot.git && cd solana-mev-bot && chmod +x scripts/setup_vultr.sh && ./scripts/setup_vultr.sh"
+
+expect "password:"
+send "$password\r"
+
+expect {
+    "Setup Complete!" { exit 0 }
+    timeout { exit 1 }
+    eof { exit 0 }
+}

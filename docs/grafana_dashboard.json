@@ -175,6 +175,44 @@
                     "x": 12,
                     "y": 24
                 }
+            },
+            {
+                "id": 9,
+                "title": "Golden DNA Match Rate",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "rate(dna_matches_total[5m])",
+                        "legendFormat": "Standard DNA Matches/sec"
+                    },
+                    {
+                        "expr": "rate(dna_elite_matches_total[5m])",
+                        "legendFormat": "Golden Elite Matches/sec"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 0,
+                    "y": 32
+                }
+            },
+            {
+                "id": 10,
+                "title": "Mojito Discovery Throughput",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "rate(discovery_tokens_detected_total[5m])",
+                        "legendFormat": "Tokens/sec"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 12,
+                    "y": 32
+                }
             }
         ],
         "refresh": "10s",

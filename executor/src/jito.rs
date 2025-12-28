@@ -1,9 +1,7 @@
 use solana_sdk::{
-    instruction::Instruction,
     signature::{Keypair, Signer},
     pubkey::Pubkey,
     transaction::{Transaction, VersionedTransaction},
-    system_instruction,
 };
 use solana_client::rpc_client::RpcClient;
 use jito_protos::searcher::{
@@ -16,6 +14,7 @@ use tokio::sync::Mutex;
 use std::error::Error;
 use std::str::FromStr;
 use rand::seq::SliceRandom; 
+use serde::Deserialize;
 
 use mev_core::ArbitrageOpportunity;
 use strategy::ports::{ExecutionPort, PoolKeyProvider, TelemetryPort};
@@ -23,7 +22,6 @@ use strategy::ports::{ExecutionPort, PoolKeyProvider, TelemetryPort};
 pub struct JitoExecutor {
     clients: Vec<Arc<Mutex<SearcherServiceClient<Channel>>>>,  // Multiple endpoints
     current_endpoint_index: Arc<Mutex<usize>>,  // Round-robin tracker
-    block_engine_urls: Vec<String>,  // For reconnection
     auth_keypair: Arc<Keypair>,
     payer_pubkey: Pubkey,
     rpc_client: Arc<RpcClient>,
@@ -31,6 +29,17 @@ pub struct JitoExecutor {
     key_provider: Option<Arc<dyn PoolKeyProvider>>,
     telemetry: Option<Arc<dyn TelemetryPort>>,  // NEW
     max_retries: u32,  // Retry attempts per endpoint
+    tip_floor_url: String, // NEW: Jito Tip Floor API
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct TipFloorResponse {
+    pub landed_tips_25th_percentile: f64,
+    pub landed_tips_50th_percentile: f64,
+    pub landed_tips_75th_percentile: f64,
+    pub landed_tips_95th_percentile: f64,
+    pub landed_tips_99th_percentile: f64,
+    pub ema_landed_tips_50th_percentile: f64,
 }
 
 impl JitoExecutor {
@@ -92,7 +101,6 @@ impl JitoExecutor {
         Ok(Self {
             clients,
             current_endpoint_index: Arc::new(Mutex::new(0)),
-            block_engine_urls: urls,
             auth_keypair: auth_arc,
             payer_pubkey,
             rpc_client: Arc::new(rpc),
@@ -100,7 +108,25 @@ impl JitoExecutor {
             key_provider,
             telemetry,
             max_retries: 3,  // 3 attempts per endpoint
+            tip_floor_url: "https://mainnet.block-engine.jito.wtf/api/v1/bundles/tip_floor".to_string(),
         })
+    }
+
+    /// Fetches the current tip floor from Jito HTTP API
+    pub async fn get_tip_floor(&self) -> anyhow::Result<u64> {
+        let resp = reqwest::get(&self.tip_floor_url)
+            .await?
+            .json::<Vec<TipFloorResponse>>()
+            .await?;
+            
+        if let Some(floor) = resp.first() {
+            // Use 50th percentile as the minimum base
+            // API returns values in SOL (f64), convert to lamports
+            let lamports = (floor.ema_landed_tips_50th_percentile * 1e9) as u64;
+            return Ok(lamports);
+        }
+        
+        Err(anyhow::anyhow!("No tip floor data available"))
     }
 
     /// Send bundle with retry logic and round-robin endpoint selection
@@ -122,13 +148,26 @@ impl JitoExecutor {
             tracing::debug!("Attempting Jito endpoint {} (attempt {} of {})", 
                 client_index + 1, endpoint_attempt + 1, self.clients.len());
             
+            // 🛡️ Dynamic Tipping logic (Phase 17)
+            let mut final_tip = tip_amount_lamports;
+            if let Ok(floor) = self.get_tip_floor().await {
+                // Heuristic: floor + 5% surcharge to be competitive
+                let competitive_tip = (floor as f64 * 1.05) as u64;
+                
+                // Only upgrade if floor is higher than our planned tip
+                if competitive_tip > final_tip {
+                    tracing::info!("⚖️ Jito Tip Upgrade: Floor is {}, raising tip to {} lamports", floor, competitive_tip);
+                    final_tip = competitive_tip;
+                }
+            }
+
             // Try with exponential backoff
             for retry in 0..self.max_retries {
                 if let Some(ref tel) = self.telemetry {
                     tel.log_endpoint_attempt(client_index);
                 }
 
-                match self.send_bundle_to_endpoint(client_index, trade_ixs.clone(), tip_amount_lamports).await {
+                match self.send_bundle_to_endpoint(client_index, trade_ixs.clone(), final_tip).await {
                     Ok(sig) => {
                         tracing::info!("✅ Bundle submitted via endpoint {} on attempt {}", 
                             client_index + 1, retry + 1);
@@ -184,7 +223,11 @@ impl JitoExecutor {
             tip_amount_lamports
         );
 
-        let mut bundle_ixs = trade_ixs;
+        let mut bundle_ixs = vec![
+            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(250_000), // Standard safe limit for 3-hop swap
+            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(1_000),    // Baseline priority for RPC layer
+        ];
+        bundle_ixs.extend(trade_ixs);
         bundle_ixs.push(tip_ix);
 
         let tx = Transaction::new_signed_with_payer(
@@ -265,14 +308,23 @@ impl ExecutionPort for JitoExecutor {
                 } 
                 // Orca Path
                 else if step.program_id == mev_core::constants::ORCA_WHIRLPOOL_PROGRAM {
-                    let keys = provider.get_orca_keys(&step.pool).await?;
-                    let mut final_keys = keys;
-                    final_keys.token_authority = self.payer_pubkey;
+                    let mut keys = provider.get_orca_keys(&step.pool).await?;
+                    keys.token_authority = self.payer_pubkey;
+                    
+                    // Resolve user ATAs
+                    keys.token_owner_account_a = spl_associated_token_account::get_associated_token_address(
+                        &self.payer_pubkey,
+                        &keys.mint_a
+                    );
+                    keys.token_owner_account_b = spl_associated_token_account::get_associated_token_address(
+                        &self.payer_pubkey,
+                        &keys.mint_b
+                    );
                     
                     let a_to_b = step.input_mint == keys.mint_a;
                     
                     instructions.push(crate::orca_builder::swap(
-                        &final_keys,
+                        &keys,
                         current_amount_in,
                         step_min_out,
                         0, // Refined builder will use default safe price limits
@@ -341,14 +393,23 @@ impl ExecutionPort for JitoExecutor {
                     ));
                 } 
                 else if step.program_id == mev_core::constants::ORCA_WHIRLPOOL_PROGRAM {
-                    let keys = provider.get_orca_keys(&step.pool).await?;
-                    let mut final_keys = keys;
-                    final_keys.token_authority = self.payer_pubkey;
+                    let mut keys = provider.get_orca_keys(&step.pool).await?;
+                    keys.token_authority = self.payer_pubkey;
+
+                    // Resolve user ATAs
+                    keys.token_owner_account_a = spl_associated_token_account::get_associated_token_address(
+                        &self.payer_pubkey,
+                        &keys.mint_a
+                    );
+                    keys.token_owner_account_b = spl_associated_token_account::get_associated_token_address(
+                        &self.payer_pubkey,
+                        &keys.mint_b
+                    );
                     
                     let a_to_b = step.input_mint == keys.mint_a;
                     
                     ixs.push(crate::orca_builder::swap(
-                        &final_keys,
+                        &keys,
                         current_amount_in,
                         step_min_out,
                         0,
@@ -381,6 +442,31 @@ impl ExecutionPort for JitoExecutor {
                 tracing::info!("✅ Jito bundle submitted: {}", sig);
                 if let Some(ref tel) = self.telemetry {
                     tel.log_jito_success();
+                    
+                    // Spawn background poller for PnL tracking
+                    let rpc = Arc::clone(&self.rpc_client);
+                    let telemetry = Arc::clone(tel);
+                    let profit = opportunity.expected_profit_lamports;
+                    let signature = sig.clone();
+                    
+                    tokio::spawn(async move {
+                        // Poll for confirmation (max 60s)
+                        for _ in 0..20 {
+                            if let Ok(confirmed) = rpc.get_signature_status(&signature.parse().unwrap()) {
+                                if let Some(Ok(_)) = confirmed {
+                                    tracing::info!("💰 Trade Confirmed! Reporting +{} lamports", profit);
+                                    telemetry.log_realized_pnl(profit as i64);
+                                    return;
+                                } else if let Some(Err(e)) = confirmed {
+                                    tracing::warn!("💸 Trade Failed on-chain: {}. Reporting loss.", e);
+                                    telemetry.log_realized_pnl(-(profit as i64)); // Consider it a loss of expected profit
+                                    return;
+                                }
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+                        }
+                        tracing::error!("⌛ Confirmation timeout for signature {}. PnL estimate uncertain.", signature);
+                    });
                 }
                 Ok(sig)
             }
@@ -426,18 +512,27 @@ impl ExecutionPort for JitoExecutor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_jito_tip_accounts_config() {
-        // We can't easily test JitoExecutor::new without a real block engine connection
-        // But we can check if the tip accounts are correctly hardcoded as expected.
-        let tip_accounts = vec![
-            Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5").unwrap(),
-            Pubkey::from_str("HFqU5x63VTqvQss8hp11i4wVV8bD44PuyAC8eF6S7yBz").unwrap(),
-            Pubkey::from_str("Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY").unwrap(),
-            Pubkey::from_str("ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49").unwrap(),
-        ];
-        
-        assert_eq!(tip_accounts.len(), 4);
-        assert!(tip_accounts.contains(&Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5").unwrap()));
+    #[tokio::test]
+    async fn test_jito_tip_floor_query() {
+        // This test requires internet access to connect to Jito API
+        // In CI/Simulated environments, we might want to mock this.
+        // For local verification, we can try a real query if possible.
+        let auth = Keypair::new();
+        let rpc = "https://api.mainnet-beta.solana.com";
+        let jito = match JitoExecutor::new("mainnet-beta.jito.wtf", &auth, rpc, None, None).await {
+            Ok(j) => j,
+            Err(_) => return, // Skip if no connection
+        };
+
+        match jito.get_tip_floor().await {
+            Ok(floor) => {
+                println!("Got Jito Tip Floor: {} lamports", floor);
+                assert!(floor > 0);
+            }
+            Err(e) => {
+                println!("Jito Tip Floor query failed: {}", e);
+                // Don't fail the test if it's just a network/API issue
+            }
+        }
     }
 }

@@ -1,4 +1,5 @@
 use std::env;
+use std::str::FromStr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -7,10 +8,8 @@ use solana_sdk::signature::{read_keypair_file, Signer};
 use tracing::{info, error, warn};
 
 // Internal Crates
-use mev_core::MarketUpdate;
-use strategy::{StrategyEngine};
-use executor::jito::JitoExecutor;
-use executor::legacy::LegacyExecutor;
+use strategy::StrategyEngine;
+// Removed unused JitoExecutor and LegacyExecutor
 
 mod config;
 mod listener;
@@ -23,7 +22,11 @@ mod metrics;
 mod risk;
 mod telemetry;
 mod alerts;
+mod intelligence;
+mod discovery;
+mod birth_watcher;
 
+use crate::intelligence::MarketIntelligence;
 use crate::wallet_manager::WalletManager;
 
 /// Global Application Context
@@ -42,6 +45,7 @@ pub struct AppContext {
 #[tokio::main]
 async fn main() {
     dotenv().ok();
+    let bot_start_time = tokio::time::Instant::now();
     
     // 1. Initial Logging Setup (Plaintext for bootstrap)
     tracing_subscriber::fmt()
@@ -112,7 +116,6 @@ async fn main() {
             &bot_cfg.rpc_url,
             solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).expect("Failed to clone keypair"),
             Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
-            Some(Arc::clone(&metrics) as Arc<dyn strategy::ports::TelemetryPort>),
         ))
     } else {
         match executor::jito::JitoExecutor::new(
@@ -129,11 +132,47 @@ async fn main() {
                     &bot_cfg.rpc_url,
                     solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).expect("Failed to clone keypair"),
                     Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
-                    Some(Arc::clone(&metrics) as Arc<dyn strategy::ports::TelemetryPort>),
                 ))
             }
         }
     };
+    
+    // 4.3.5 Initialize Success Library Infrastructure (Early for Feedback Loop)
+    let db_pool = if let Some(url) = &bot_cfg.database_url {
+        let pg_config = tokio_postgres::Config::from_str(url)
+            .map_err(|e| format!("Invalid DATABASE_URL: {}", e));
+        
+        match pg_config {
+            Ok(conf) => {
+                let mgr = deadpool_postgres::Manager::new(conf, tokio_postgres::NoTls);
+                let pool = deadpool_postgres::Pool::builder(mgr)
+                    .max_size(5)
+                    .build();
+                
+                match pool {
+                    Ok(p) => {
+                        info!("✅ Initialized SUCCESS LIBRARY Database Pool (PostgreSQL)");
+                        Some(p)
+                    },
+                    Err(e) => {
+                        error!("❌ Failed to build Postgres Pool: {}. Falling back to file storage.", e);
+                        None
+                    }
+                }
+            },
+            Err(e) => {
+                error!("❌ {}. Falling back to file storage.", e);
+                None
+            }
+        }
+    } else {
+        warn!("⚠️ DATABASE_URL not set. Success Library will use file fallback.");
+        None
+    };
+
+    let intel_impl = Arc::new(intelligence::DatabaseIntelligence::new(db_pool));
+    let intelligence_mgr: Arc<dyn MarketIntelligence> = intel_impl.clone();
+    let intel_port: Arc<dyn strategy::ports::MarketIntelligencePort> = intel_impl;
 
     // 4.5 Initialize Strategy Engine (The Brain)
     let engine = Arc::new(StrategyEngine::new(
@@ -143,6 +182,7 @@ async fn main() {
         Some(Arc::clone(&performance_tracker)),
         Some(Arc::clone(&safety_checker)),
         Some(Arc::clone(&metrics) as Arc<dyn strategy::ports::TelemetryPort>),
+        Some(intel_port),
     ));
 
     let wallet_mgr = Arc::new(WalletManager::new(&bot_cfg.rpc_url));
@@ -173,7 +213,16 @@ async fn main() {
         Arc::clone(&alert_mgr), 
         Arc::clone(&metrics),
         Arc::clone(&wallet_mgr),
-        payer.pubkey()
+        payer.pubkey(),
+        bot_start_time
+    ));
+
+    // Start Telegram Command Listener (V2)
+    tokio::spawn(Arc::clone(&alert_mgr).handle_telegram_commands(
+        Arc::clone(&metrics),
+        Arc::clone(&wallet_mgr),
+        payer.pubkey(),
+        bot_start_time
     ));
 
     // Start 5-minute periodic reporting (Log-based)
@@ -254,8 +303,21 @@ async fn main() {
     info!("   └─ Total: {} tokens tracked", inventory.len());
     info!("📊 -------------------------------");
     
-    let (tx, mut rx) = mpsc::channel::<MarketUpdate>(1024);
+    let (tx, _rx) = tokio::sync::broadcast::channel::<mev_core::MarketUpdate>(1024);
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    
+    // 6.5. TUI Dashboard (Real-time Monitoring) - MOVED UP
+    let no_tui = env::args().any(|a| a == "--no-tui");
+    let tui_state = Arc::new(std::sync::Mutex::new(tui::AppState::new()));
+    if !no_tui {
+        let tui_state_clone = Arc::clone(&tui_state);
+        std::thread::spawn(move || {
+            if let Err(e) = tui::TuiApp::new(tui_state_clone).run() {
+                error!("TUI error: {}", e);
+            }
+        });
+        info!("📊 TUI Dashboard ACTIVE (press 'q' to quit)");
+    }
     
     let mut pools_to_watch = HashMap::new();
     
@@ -294,25 +356,58 @@ async fn main() {
         info!("🛑 Shutdown signal received (Ctrl+C). Cleaning up...");
         let _ = shutdown_tx_signal.send(()).await;
     });
-
-    // 6.5. TUI Dashboard (Real-time Monitoring)
-    let args: Vec<String> = env::args().collect();
-    let no_tui = args.contains(&"--no-tui".to_string());
     
-    if !no_tui {
-        let tui_state = Arc::new(std::sync::Mutex::new(tui::AppState::new()));
-        let tui_state_clone = Arc::clone(&tui_state);
+    // 6.2 Success Library Infrastructure
+    let args: Vec<String> = env::args().collect();
+    let discovery_enabled = args.contains(&"--discovery".to_string()) 
+        || env::var("DISCOVERY_ENABLED").is_ok()
+        || bot_cfg.mode != config::ExecutionMode::Simulation;
+    let analyze_mode = args.contains(&"--analyze".to_string());
+    
+    // 6.3 Discovery Engine (Live Ingestion)
+    if discovery_enabled {
+        info!("🔍 Discovery Engine Requested. Starting live pool monitoring...");
+        let (discovery_tx, discovery_rx) = mpsc::channel(128);
         
-        // Spawn TUI in separate thread (not async)
-        let _tui_handle = std::thread::spawn(move || {
-            if let Err(e) = tui::TuiApp::new(tui_state_clone).run() {
-                error!("TUI error: {}", e);
-            }
+        let discovery_ws = bot_cfg.ws_url.clone(); // Restored
+        let tui_clone = Arc::clone(&tui_state);
+        let market_tx_clone = tx.clone();
+        tokio::spawn(async move {
+            discovery::start_discovery(discovery_ws, discovery_tx, market_tx_clone, Some(tui_clone)).await;
         });
-        info!("📊 TUI Dashboard ACTIVE (press 'q' to quit)");
-    } else {
-        info!("📊 TUI Dashboard DISABLED (--no-tui present)");
+
+        let birth_watcher = Arc::new(birth_watcher::BirthWatcher::new(
+            Arc::new(bot_cfg.clone()),
+            Arc::clone(&intelligence_mgr),
+            &bot_cfg.rpc_url,
+        ));
+        
+        tokio::spawn(async move {
+            birth_watcher.run(discovery_rx).await;
+        });
+        
+        info!("✅ Success Library Ingestion ACTIVE.");
     }
+
+    // 6.4 Analysis Mode (Success DNA Extraction)
+    if analyze_mode {
+        info!("🧬 Analysis Mode Requested. Extracting Success DNA...");
+        match intelligence_mgr.get_analysis().await {
+            Ok(analysis) => {
+                println!("\n🧬 ==========================================");
+                println!("🧬   SUCCESS LIBRARY ANALYSIS (DNA REPORT)   ");
+                println!("🧬 ==========================================");
+                println!("🧬 Average Peak ROI:          {:.2}%", analysis.average_peak_roi);
+                println!("🧬 Median Time to Peak:       {}s", analysis.median_time_to_peak);
+                println!("🧬 Total Successful Launches: {}", analysis.total_successful_launches);
+                println!("🧬 Strategy Effectiveness:    {:.2}%", analysis.strategy_effectiveness * 100.0);
+                println!("🧬 ==========================================\n");
+            },
+            Err(e) => error!("❌ Failed to generate analysis: {}", e),
+        }
+    }
+
+    // 6.5. TUI Dashboard (Real-time Monitoring) - MOVED TO STEP 6.1
 
     info!("🔥 Engine IGNITION. Waiting for market events...");
 
@@ -320,23 +415,33 @@ async fn main() {
     alert_mgr.send_alert(
         alerts::AlertSeverity::Success, 
         "HFT Engine Started", 
-        &format!("Engine version {} is now live and listening for market events. Monitoring {} pools.", env!("CARGO_PKG_VERSION"), pools_to_watch.len()),
+        &format!("Engine version {} is now live. Monitoring {} pools.", env!("CARGO_PKG_VERSION"), pools_to_watch.len()),
         vec![
             alerts::Field { name: "Identity".to_string(), value: context.payer.pubkey().to_string(), inline: false },
             alerts::Field { name: "Jito".to_string(), value: (!bot_cfg.jito_url.is_empty()).to_string(), inline: true },
-            alerts::Field { name: "RPC".to_string(), value: bot_cfg.rpc_url.clone(), inline: false },
         ]
     ).await;
+    
+    // 7. Worker Pool Ignition (HFT Optimization)
+    let num_workers = 8;
+    for i in 0..num_workers {
+        let mut worker_rx = tx.subscribe();
+        let ctx = Arc::clone(&context);
+        let rec_inner = recorder.clone();
+        let tui_worker_clone = Arc::clone(&tui_state);
+        
+        tokio::spawn(async move {
+            info!("👷 Worker {} started.", i);
+            while let Ok(event) = worker_rx.recv().await {
+                // Update WebSocket status in telemetry
+                telemetry::WEBSOCKET_STATUS.set(1);
 
-    // 🧪 FORCED_ARB_MOCK: Removed for Phase 2 Verification
-    // High-fidelity simulation now uses real market data with simulation execution.
+                // 🛡️ Remote Control Check
+                if ctx.metrics.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
 
-    // 7. The Core Loop
-    loop {
-        tokio::select! {
-            // A. Process Market Events
-            Some(event) = rx.recv() => {
-                let domain_update = mev_core::PoolUpdate {
+                let domain_update = Arc::new(mev_core::PoolUpdate {
                     pool_address: event.pool_address,
                     program_id: event.program_id,
                     mint_a: event.coin_mint,
@@ -347,84 +452,91 @@ async fn main() {
                     liquidity: event.liquidity,
                     fee_bps: 30, 
                     timestamp: event.timestamp as u64,
-                };
+                });
+                
+                // Track discovery throughput if this is a new pool event
+                // (Note: event is from listener, but discovery also sends events to birth_watcher)
+                // Actually, let's track it in birth_watcher or discovery.rs directly.
 
                 // Record Market Data
-                if let Some(r) = &recorder {
+                if let Some(r) = &rec_inner {
                     let r_clone = Arc::clone(r);
-                    let update_clone = domain_update.clone();
+                    let update_clone = Arc::clone(&domain_update);
                     tokio::spawn(async move {
-                        r_clone.record(update_clone).await;
+                        r_clone.record((*update_clone).clone()).await;
                     });
                 }
 
-                let ctx = Arc::clone(&context);
-                let rec_inner = recorder.clone();
-                tokio::spawn(async move {
-                    // Update WebSocket status in telemetry
-                    telemetry::WEBSOCKET_STATUS.set(1);
+                // 🛡️ Risk Check
+                if let Err(_e) = ctx.risk_mgr.can_trade(ctx.config.default_trade_size_lamports) {
+                    continue; // Skip silently in hot path
+                }
 
-                    // 🛡️ Risk Check
-                    if let Err(e) = ctx.risk_mgr.can_trade(ctx.config.default_trade_size_lamports) {
-                        tracing::debug!("🚫 Trade blocked by RiskManager: {}", e);
-                        return;
-                    }
+                let start_time = std::time::Instant::now();
+                match ctx.engine.process_event(
+                    domain_update, 
+                    ctx.config.default_trade_size_lamports,
+                    ctx.config.jito_tip_lamports,
+                    ctx.config.jito_tip_percentage,
+                    ctx.config.max_jito_tip_lamports,
+                    ctx.config.max_slippage_bps,
+                    ctx.config.volatility_sensitivity,
+                    ctx.config.max_slippage_ceiling,
+                    ctx.config.min_profit_threshold_lamports,
+                    ctx.config.ai_confidence_threshold
+                ).await {
+                    Ok(Some(opportunity)) => {
+                        let duration = start_time.elapsed().as_millis() as f64;
+                        telemetry::DETECTION_LATENCY.observe(duration);
+                        telemetry::OPPORTUNITIES_TOTAL.inc();
+                        telemetry::OPPORTUNITIES_PROFITABLE.inc();
+                        
+                        // Phase 11: DNA Telemetry
+                        if opportunity.is_dna_match {
+                            telemetry::DNA_MATCHES_TOTAL.inc();
+                        }
+                        if opportunity.is_elite_match {
+                            telemetry::DNA_ELITE_MATCHES_TOTAL.inc();
+                        }
 
-                    let start_time = std::time::Instant::now();
-                    match ctx.engine.process_event(
-                        domain_update, 
-                        ctx.config.default_trade_size_lamports,
-                        ctx.config.jito_tip_lamports,
-                        ctx.config.jito_tip_percentage,
-                        ctx.config.max_jito_tip_lamports,
-                        ctx.config.max_slippage_bps,
-                        ctx.config.volatility_sensitivity,
-                        ctx.config.max_slippage_ceiling
-                    ).await {
-                        Ok(Some(opportunity)) => {
-                            let duration = start_time.elapsed().as_millis() as f64;
-                            telemetry::DETECTION_LATENCY.observe(duration);
-                            telemetry::OPPORTUNITIES_TOTAL.inc();
-                            telemetry::OPPORTUNITIES_PROFITABLE.inc();
-
-                            // 📊 Metrics Tracking
-                            ctx.metrics.log_opportunity(true);
-                            
-                            // 📉 Risk Recording
-                            ctx.risk_mgr.record_trade(ctx.config.default_trade_size_lamports, opportunity.expected_profit_lamports as i64);
-
-                            // telemetry::TRADES_EXECUTED.inc();
-                            // telemetry::PROFIT_LAMPORTS.inc_by(opportunity.expected_profit_lamports as f64);
-
-                            if let Some(r) = &rec_inner {
-                                let _ = r.record_arbitrage(opportunity).await;
+                        ctx.metrics.log_opportunity(true);
+                        
+                        // Push to TUI
+                        {
+                            if let Ok(mut state) = tui_worker_clone.lock() {
+                                state.recent_opportunities.push(opportunity.clone());
+                                state.current_latency_ms = duration;
+                                if opportunity.expected_profit_lamports > 0 {
+                                    state.total_simulated_pnl += opportunity.expected_profit_lamports;
+                                }
                             }
                         }
-                        Ok(None) => {
-                            telemetry::OPPORTUNITIES_TOTAL.inc();
-                            // Opportunity was either not found or rejected by safety checks
-                        }
-                        Err(e) => {
-                            telemetry::RPC_ERRORS.inc();
-                            ctx.metrics.rpc_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            error!("💥 Processing error: {}", e);
+
+                        ctx.risk_mgr.record_trade(ctx.config.default_trade_size_lamports, opportunity.expected_profit_lamports as i64);
+                        if let Some(r) = &rec_inner {
+                            let _ = r.record_arbitrage(opportunity).await;
                         }
                     }
-                });
+                    Ok(None) => {
+                        telemetry::OPPORTUNITIES_TOTAL.inc();
+                    }
+                    Err(e) => {
+                        telemetry::RPC_ERRORS.inc();
+                        ctx.metrics.rpc_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        error!("💥 Worker {} processing error: {}", i, e);
+                    }
+                }
             }
-            
-            _ = shutdown_rx.recv() => {
-                info!("👋 Engine shutting down gracefully...");
-                context.metrics.print_summary();
-                context.alert_mgr.send_final_report(Arc::clone(&context.metrics)).await;
-                info!("Goodbye!");
-                break;
-            }
-            
-            else => {
-                info!("⚠️ Ingress channel closed. Exiting.");
-                break;
-            }
+        });
+    }
+
+    // 8. The Idle Monitor
+    tokio::select! {
+        _ = shutdown_rx.recv() => {
+            info!("👋 Engine shutting down gracefully...");
+            context.metrics.print_summary();
+            context.alert_mgr.send_final_report(Arc::clone(&context.metrics), bot_start_time).await;
+            info!("Goodbye!");
         }
     }
 }

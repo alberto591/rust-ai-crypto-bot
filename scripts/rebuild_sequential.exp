@@ -1,0 +1,16 @@
+#!/usr/bin/expect -f
+set timeout 60
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+spawn ssh -o StrictHostKeyChecking=no root@$ip "rm -rf /root/solana-mev-bot/target && cd /root/solana-mev-bot && source \$HOME/.cargo/env && export PROTOC=/usr/bin/protoc && cargo build --release -j 1"
+
+expect "password:"
+send "$password\r"
+
+set timeout 3600
+expect {
+    "Finished `release` profile" { exit 0 }
+    timeout { exit 1 }
+    eof { exit 0 }
+}

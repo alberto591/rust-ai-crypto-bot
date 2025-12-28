@@ -1,5 +1,5 @@
 use futures_util::{StreamExt, SinkExt};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::broadcast::Sender;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use serde_json::{json, Value}; // This line was intended to be kept, the provided snippet was malformed.
 use solana_sdk::pubkey::Pubkey;
@@ -79,7 +79,7 @@ pub async fn start_listener(
             Ok(Message::Text(text)) => {
                 // Debug: Log that we got *something* (ignore requests/responses with ID)
                 if !text.contains("\"id\":") {
-                     tracing::info!("📩 WS Msg ({} chars): {:.100}...", text.len(), text);
+                     tracing::debug!("📩 WS Msg ({} chars): {:.100}...", text.len(), text);
                 }
                 if let Ok(json) = serde_json::from_str::<Value>(&text) {
                     // A. Handle Subscription Responses
@@ -125,7 +125,7 @@ pub async fn start_listener(
                                                         liquidity: Some(whirlpool.liquidity()),
                                                         timestamp: ts,
                                                     };
-                                                    if tx.send(update).await.is_err() { break; }
+                                                    if tx.send(update).is_err() { break; }
                                                 } else if bytes.len() == 752 { // Raydium V4 CPMM
                                                     let amm_info: &mev_core::raydium::AmmInfo = unsafe {
                                                         &*(bytes.as_ptr() as *const mev_core::raydium::AmmInfo)
@@ -141,7 +141,7 @@ pub async fn start_listener(
                                                         liquidity: None,
                                                         timestamp: ts,
                                                     };
-                                                    if tx.send(update).await.is_err() { break; }
+                                                    if tx.send(update).is_err() { break; }
                                                 } else if bytes.len() == 1544 { // Raydium CLMM
                                                     // TODO: Detailed Raydium CLMM layout. For now, mark as recognized.
                                                     tracing::debug!("Detected Raydium CLMM update (1544 bytes) for pool {}", pool_addr);

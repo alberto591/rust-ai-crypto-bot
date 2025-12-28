@@ -1,0 +1,12 @@
+#!/usr/bin/expect -f
+set timeout 30
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+# Update KEYPAIR_PATH to the VPS location
+spawn ssh -o StrictHostKeyChecking=no root@$ip "sed -i 's|KEYPAIR_PATH=.*|KEYPAIR_PATH=/root/solana-mev-bot/id.json|' /root/solana-mev-bot/.env"
+
+expect "password:"
+send "$password\r"
+
+expect eof

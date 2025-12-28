@@ -1,7 +1,4 @@
-use solana_sdk::{
-    instruction::{AccountMeta, Instruction},
-    pubkey::Pubkey,
-};
+use solana_sdk::instruction::{AccountMeta, Instruction};
 use std::mem::size_of;
 use mev_core::orca::OrcaSwapKeys;
 

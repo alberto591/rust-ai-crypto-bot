@@ -10,6 +10,12 @@ pub struct VolatilityTracker {
     price_history: RwLock<HashMap<Pubkey, VecDeque<f64>>>,
 }
 
+impl Default for VolatilityTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VolatilityTracker {
     pub fn new() -> Self {
         Self {

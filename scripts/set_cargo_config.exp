@@ -1,0 +1,11 @@
+#!/usr/bin/expect -f
+set timeout 30
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+spawn ssh -o StrictHostKeyChecking=no root@$ip "mkdir -p /root/solana-mev-bot/.cargo && printf '\[env\]\\nPROTOC = \"/usr/bin/protoc\"\\n' > /root/solana-mev-bot/.cargo/config.toml && cat /root/solana-mev-bot/.cargo/config.toml"
+
+expect "password:"
+send "$password\r"
+
+expect eof

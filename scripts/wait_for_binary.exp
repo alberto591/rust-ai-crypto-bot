@@ -1,0 +1,12 @@
+#!/usr/bin/expect -f
+set timeout 3600
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+spawn ssh -o StrictHostKeyChecking=no root@$ip "while ! test -f /root/solana-mev-bot/target/release/engine; do echo 'Waiting for engine binary...'; sleep 30; done; echo 'BINARY_FOUND!'"
+
+expect "password:"
+send "$password\r"
+
+expect "BINARY_FOUND!"
+exit 0

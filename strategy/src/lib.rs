@@ -34,7 +34,8 @@ pub struct StrategyEngine {
     performance_tracker: Option<Arc<crate::analytics::performance::PerformanceTracker>>,
     safety_checker: Option<Arc<crate::safety::token_validator::TokenSafetyChecker>>,
     volatility_tracker: Arc<VolatilityTracker>,
-    telemetry: Option<Arc<dyn TelemetryPort>>,  // NEW
+    telemetry: Option<Arc<dyn TelemetryPort>>,
+    market_intelligence: Option<Arc<dyn crate::ports::MarketIntelligencePort>>,  // NEW
     pub total_simulated_pnl: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -46,6 +47,7 @@ impl StrategyEngine {
         performance_tracker: Option<Arc<crate::analytics::performance::PerformanceTracker>>,
         safety_checker: Option<Arc<crate::safety::token_validator::TokenSafetyChecker>>,
         telemetry: Option<Arc<dyn TelemetryPort>>,
+        market_intelligence: Option<Arc<dyn crate::ports::MarketIntelligencePort>>,
     ) -> Self {
         let volatility_tracker = Arc::new(VolatilityTracker::new());
         Self {
@@ -57,13 +59,14 @@ impl StrategyEngine {
             safety_checker,
             volatility_tracker,
             telemetry,
+            market_intelligence,
             total_simulated_pnl: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
     pub async fn process_event(
         &self, 
-        update: PoolUpdate, 
+        update: Arc<PoolUpdate>, 
         initial_amount: u64,
         jito_tip_lamports: u64,
         jito_tip_percentage: f64,
@@ -71,13 +74,16 @@ impl StrategyEngine {
         max_slippage_bps: u16,
         volatility_sensitivity: f64,
         max_slippage_ceiling: u16,
+        min_profit_threshold: u64,
+        ai_confidence_threshold: f32,
     ) -> anyhow::Result<Option<ArbitrageOpportunity>> {
         // ... (Safety gates etc) ...
         // ... (Update Graph & Find Cycle) ...
 
         // 🛡️ SAFETY GATES (Institutional Grade)
         const MAX_TRADE_SIZE: u64 = 1_000_000_000; // 1.0 SOL (Panic Limit)
-        const MIN_PROFIT_THRESHOLD: u64 = 15_000;  // Lowered to 15k to catch smaller opportunities
+        
+        // REPLACED CONST WITH ARGUMENT: const MIN_PROFIT_THRESHOLD...
         
         // Check 1: Is the bet too big?
         if initial_amount > MAX_TRADE_SIZE {
@@ -86,7 +92,7 @@ impl StrategyEngine {
         }
 
         // 1. Update Graph & Find Cycle
-        let opportunity = match self.arb_strategy.process_update(update, initial_amount) {
+        let opportunity = match self.arb_strategy.process_update((*update).clone(), initial_amount) {
             Some(opp) => opp,
             None => return Ok(None),
         };
@@ -124,7 +130,7 @@ impl StrategyEngine {
 
         // Check 2: Is the profit worth the gas? (After tip)
         let net_profit = profit.saturating_sub(tip_lamports);
-        if net_profit < MIN_PROFIT_THRESHOLD {
+        if net_profit < min_profit_threshold {
             debug!("⛔ SAFETY TRIGGER: Net profit {} is too small.", net_profit);
             return Ok(None);
         }
@@ -150,7 +156,7 @@ impl StrategyEngine {
             if let Some(checker) = &self.safety_checker {
                 // Check all output mints in the path (excluding the start/end which is usually SOL/USDC)
                 for step in &opportunity.steps {
-                    if !checker.is_safe_to_trade(&step.output_mint, &step.pool).await {
+                    if !checker.is_safe_to_trade(&step.output_mint, &step.pool).await.map_err(|e| anyhow::anyhow!("Safety check failed: {}", e))? {
                         warn!("⛔ SAFETY: Token {} in pool {} failed safety check. Aborting trade.", step.output_mint, step.pool);
                         if let Some(ref tel) = self.telemetry {
                             tel.log_safety_rejection();
@@ -457,12 +463,14 @@ impl ArbitrageStrategy {
                     
                     if best_opp.as_ref().is_none_or(|o| profit > o.expected_profit_lamports) {
                         *best_opp = Some(ArbitrageOpportunity {
-                            steps: steps.to_vec(),  // Convert SmallVec to Vec for API
+                            steps: steps,  // Pass SmallVec directly
                             expected_profit_lamports: profit,
                             input_amount: initial_amount,
                             total_fees_bps,
                             max_price_impact_bps,
                             min_liquidity,
+                            is_dna_match: false,
+                            is_elite_match: false,
                             timestamp: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap()

@@ -8,8 +8,8 @@ mev-core = { path = "../core" }
 strategy = { path = "../strategy" }
 solana-client = "1.17"
 solana-sdk = "1.17"
-spl-token = "4.0"
-spl-associated-token-account = "2.3"
+spl-token = "=4.0.0"
+spl-associated-token-account = "2.3.0"
 jito-searcher-client = { path = "../libs/searcher-examples/searcher_client" }
 jito-protos = { path = "../libs/searcher-examples/jito_protos" }
 tonic = { version = "0.10", features = ["tls", "tls-roots"] }
@@ -19,6 +19,10 @@ yellowstone-grpc-client = { version = "1.13", default-features = false }
 tracing = "0.1"
 anyhow = "1.0.100"
 async-trait = "0.1.89"
+bytemuck = { version = "1.14", features = ["derive"] }
 rand = "0.8"
 thiserror = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 

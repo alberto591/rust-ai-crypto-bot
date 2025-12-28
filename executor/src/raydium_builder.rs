@@ -3,10 +3,7 @@
 /// This file manually constructs the raw byte instruction for a Raydium swap.
 /// We avoid heavy raydium-sdk dependencies by building the instruction manually
 /// (this is faster and lighter).
-use solana_sdk::{
-    instruction::{AccountMeta, Instruction},
-    pubkey::Pubkey,
-};
+use solana_sdk::instruction::{AccountMeta, Instruction};
 use std::mem::size_of;
 
 /// The Discriminator for SwapBaseIn on Raydium V4 is 9
@@ -111,9 +108,23 @@ pub fn swap_base_in(
     }
 }
 
+/// HFT Optimization: Patches an existing instruction template to avoid allocations.
+pub fn patch_base_in(
+    ix: &mut Instruction,
+    amount_in: u64,
+    min_amount_out: u64,
+) {
+    if ix.data.len() >= 17 {
+        // SwapBaseInData: instruction (1) + amount_in (8) + min_amount_out (8)
+        ix.data[1..9].copy_from_slice(&amount_in.to_le_bytes());
+        ix.data[9..17].copy_from_slice(&min_amount_out.to_le_bytes());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_sdk::pubkey::Pubkey;
     use spl_token;
     use std::str::FromStr;
 

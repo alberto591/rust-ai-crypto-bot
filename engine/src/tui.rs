@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tracing::info;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -15,15 +14,18 @@ use ratatui::{
     Terminal,
 };
 use mev_core::ArbitrageOpportunity;
+use crate::discovery::DiscoveryEvent;
 
 // Shared State Structure
 pub struct AppState {
     pub total_simulated_pnl: u64,
     pub recent_opportunities: Vec<ArbitrageOpportunity>,
+    pub recent_discoveries: Vec<DiscoveryEvent>,
     pub recent_logs: Vec<String>,
     pub is_running: bool,
     pub start_time: std::time::Instant,
     pub pool_count: usize,
+    pub current_latency_ms: f64,
 }
 
 impl AppState {
@@ -31,10 +33,12 @@ impl AppState {
         Self {
             total_simulated_pnl: 0,
             recent_opportunities: Vec::new(),
+            recent_discoveries: Vec::new(),
             recent_logs: Vec::new(),
             is_running: true,
             start_time: std::time::Instant::now(),
             pool_count: 0,
+            current_latency_ms: 0.0,
         }
     }
 }
@@ -116,9 +120,10 @@ impl TuiApp {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(4),  // Header
-                Constraint::Percentage(65), // Main Content (Opp Table) - Increased size for better visibility
-                Constraint::Percentage(35), // Logs - Reduced size
+                Constraint::Length(4),       // Header
+                Constraint::Percentage(45),  // Arbitrage Feed
+                Constraint::Percentage(25),  // Discovery Feed (Mojito)
+                Constraint::Percentage(30),  // Logs
             ].as_ref())
             .split(f.size());
 
@@ -151,6 +156,8 @@ impl TuiApp {
                 Span::styled(format!("{}s", uptime), Style::default().fg(Color::Blue)),
                 Span::raw(" | Pools: "),
                 Span::styled(format!("{}", pools), Style::default().fg(Color::Magenta)),
+                Span::raw(" | Latency: "),
+                Span::styled(format!("{:.2}ms", state.current_latency_ms), Style::default().fg(Color::Cyan)),
             ]),
         ];
         
@@ -197,6 +204,21 @@ impl TuiApp {
             .column_spacing(2);
         
         f.render_widget(t, chunks[1]);
+        
+        // 2.5 Discovery Feed (Mojito)
+        let discovery_items: Vec<ListItem> = state.recent_discoveries.iter().rev().take(15).map(|ev| {
+            ListItem::new(Line::from(vec![
+                Span::styled("💊 NEW", Style::default().fg(Color::Yellow)),
+                Span::raw(" | "),
+                Span::styled(format!("{}", ev.pool_address), Style::default().fg(Color::Magenta)),
+                Span::raw(" | "),
+                Span::styled("DNA Capture In-Progress..", Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
+            ]))
+        }).collect();
+        
+        let discovery_list = List::new(discovery_items)
+            .block(Block::default().borders(Borders::ALL).title("Mojito Bot - Live Token Discovery (Phase 10)"));
+        f.render_widget(discovery_list, chunks[2]);
 
         // 3. logs
         let logs: Vec<ListItem> = state.recent_logs.iter().rev().take(20)
@@ -204,7 +226,7 @@ impl TuiApp {
             .collect();
         
         let log_list = List::new(logs)
-            .block(Block::default().borders(Borders::ALL).title("Log Console"));
-        f.render_widget(log_list, chunks[2]);
+            .block(Block::default().borders(Borders::ALL).title("System Console"));
+        f.render_widget(log_list, chunks[3]);
     }
 }

@@ -1,0 +1,16 @@
+#!/usr/bin/expect -f
+set timeout 600
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+set local_root "/Users/lycanbeats/Desktop/Rust AI Chatbox"
+
+# Surgical rsync to exclude heavy local development directories
+spawn rsync -avr --exclude "target" --exclude "logs" --exclude ".git" --exclude ".DS_Store" --exclude "venv" --exclude "venv_old" --exclude "node_modules" "$local_root/" root@$ip:/root/solana-mev-bot
+
+expect "password:"
+send "$password\r"
+
+expect {
+    timeout { exit 1 }
+    eof { exit 0 }
+}

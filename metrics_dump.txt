@@ -1,0 +1,109 @@
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying [::1]:45678...
+* connect to ::1 port 45678 failed: Connection refused
+*   Trying 127.0.0.1:45678...
+* Connected to localhost (127.0.0.1) port 45678
+> GET /metrics HTTP/1.1
+> Host: localhost:45678
+> User-Agent: curl/8.4.0
+> Accept: */*
+> 
+< HTTP/1.1 200 OK
+< content-type: text/plain; charset=utf-8
+< content-length: 3830
+< date: Sun, 28 Dec 2025 11:24:06 GMT
+< 
+{ [3830 bytes data]
+100  3830  100  3830    0     0   771k      0 --:--:-- --:--:-- --:--:--  935k
+* Connection #0 to host localhost left intact
+# HELP actual_slippage_bps Actual slippage experienced in basis points
+# TYPE actual_slippage_bps histogram
+actual_slippage_bps_bucket{le="0.005"} 0
+actual_slippage_bps_bucket{le="0.01"} 0
+actual_slippage_bps_bucket{le="0.025"} 0
+actual_slippage_bps_bucket{le="0.05"} 0
+actual_slippage_bps_bucket{le="0.1"} 0
+actual_slippage_bps_bucket{le="0.25"} 0
+actual_slippage_bps_bucket{le="0.5"} 0
+actual_slippage_bps_bucket{le="1"} 0
+actual_slippage_bps_bucket{le="2.5"} 0
+actual_slippage_bps_bucket{le="5"} 0
+actual_slippage_bps_bucket{le="10"} 0
+actual_slippage_bps_bucket{le="+Inf"} 0
+actual_slippage_bps_sum 0
+actual_slippage_bps_count 0
+# HELP circuit_breaker_triggers_total Number of times circuit breaker was triggered
+# TYPE circuit_breaker_triggers_total counter
+circuit_breaker_triggers_total 0
+# HELP daily_pnl_lamports Current daily profit/loss in lamports
+# TYPE daily_pnl_lamports gauge
+daily_pnl_lamports 0
+# HELP detection_latency_ms Time from price update to opportunity detection
+# TYPE detection_latency_ms histogram
+detection_latency_ms_bucket{le="0.005"} 0
+detection_latency_ms_bucket{le="0.01"} 0
+detection_latency_ms_bucket{le="0.025"} 0
+detection_latency_ms_bucket{le="0.05"} 0
+detection_latency_ms_bucket{le="0.1"} 0
+detection_latency_ms_bucket{le="0.25"} 0
+detection_latency_ms_bucket{le="0.5"} 0
+detection_latency_ms_bucket{le="1"} 0
+detection_latency_ms_bucket{le="2.5"} 0
+detection_latency_ms_bucket{le="5"} 0
+detection_latency_ms_bucket{le="10"} 0
+detection_latency_ms_bucket{le="+Inf"} 0
+detection_latency_ms_sum 0
+detection_latency_ms_count 0
+# HELP discovery_tokens_detected_total Total number of new tokens detected by Mojito
+# TYPE discovery_tokens_detected_total counter
+discovery_tokens_detected_total 18254
+# HELP dna_elite_matches_total Total number of Elite (Golden Ratio/Hour) DNA matches
+# TYPE dna_elite_matches_total counter
+dna_elite_matches_total 0
+# HELP dna_matches_total Total number of standard successful DNA matches
+# TYPE dna_matches_total counter
+dna_matches_total 0
+# HELP execution_latency_ms Time from detection to transaction sent
+# TYPE execution_latency_ms histogram
+execution_latency_ms_bucket{le="0.005"} 0
+execution_latency_ms_bucket{le="0.01"} 0
+execution_latency_ms_bucket{le="0.025"} 0
+execution_latency_ms_bucket{le="0.05"} 0
+execution_latency_ms_bucket{le="0.1"} 0
+execution_latency_ms_bucket{le="0.25"} 0
+execution_latency_ms_bucket{le="0.5"} 0
+execution_latency_ms_bucket{le="1"} 0
+execution_latency_ms_bucket{le="2.5"} 0
+execution_latency_ms_bucket{le="5"} 0
+execution_latency_ms_bucket{le="10"} 0
+execution_latency_ms_bucket{le="+Inf"} 0
+execution_latency_ms_sum 0
+execution_latency_ms_count 0
+# HELP gas_spent_lamports_total Total gas/fees spent in lamports
+# TYPE gas_spent_lamports_total counter
+gas_spent_lamports_total 0
+# HELP loss_lamports_total Total loss in lamports
+# TYPE loss_lamports_total counter
+loss_lamports_total 0
+# HELP opportunities_detected_total Total arbitrage opportunities detected
+# TYPE opportunities_detected_total counter
+opportunities_detected_total 3032
+# HELP opportunities_profitable_total Opportunities with positive expected profit
+# TYPE opportunities_profitable_total counter
+opportunities_profitable_total 0
+# HELP profit_lamports_total Total profit in lamports
+# TYPE profit_lamports_total counter
+profit_lamports_total 0
+# HELP rpc_errors_total Total RPC errors encountered
+# TYPE rpc_errors_total counter
+rpc_errors_total 0
+# HELP safety_rejections_total Opportunities rejected by safety checks
+# TYPE safety_rejections_total counter
+safety_rejections_total 0
+# HELP trades_executed_total Total trades successfully executed
+# TYPE trades_executed_total counter
+trades_executed_total 0
+# HELP websocket_connected WebSocket connection status (1=connected, 0=disconnected)
+# TYPE websocket_connected gauge
+websocket_connected 1

@@ -86,6 +86,22 @@ lazy_static! {
         "safety_rejections_total",
         "Opportunities rejected by safety checks"
     ).unwrap();
+
+    // DNA & Discovery Metrics (Phase 11 Expansion)
+    pub static ref DNA_MATCHES_TOTAL: Counter = Counter::new(
+        "dna_matches_total",
+        "Total number of standard successful DNA matches"
+    ).unwrap();
+
+    pub static ref DNA_ELITE_MATCHES_TOTAL: Counter = Counter::new(
+        "dna_elite_matches_total",
+        "Total number of Elite (Golden Ratio/Hour) DNA matches"
+    ).unwrap();
+
+    pub static ref DISCOVERY_TOKENS_TOTAL: Counter = Counter::new(
+        "discovery_tokens_detected_total",
+        "Total number of new tokens detected by Mojito"
+    ).unwrap();
 }
 
 pub fn init_metrics() {
@@ -103,20 +119,42 @@ pub fn init_metrics() {
     REGISTRY.register(Box::new(CIRCUIT_BREAKER_TRIGGERS.clone())).unwrap();
     REGISTRY.register(Box::new(DAILY_PNL_LAMPORTS.clone())).unwrap();
     REGISTRY.register(Box::new(SAFETY_REJECTIONS.clone())).unwrap();
+    
+    // Phase 11 Expansion
+    REGISTRY.register(Box::new(DNA_MATCHES_TOTAL.clone())).unwrap();
+    REGISTRY.register(Box::new(DNA_ELITE_MATCHES_TOTAL.clone())).unwrap();
+    REGISTRY.register(Box::new(DISCOVERY_TOKENS_TOTAL.clone())).unwrap();
 }
 
 /// Start metrics HTTP server
 pub async fn serve_metrics() {
-    let metrics_route = warp::any()
-        .map(|| {
-            let encoder = TextEncoder::new();
-            let mut buffer = Vec::new();
-            encoder.encode(&REGISTRY.gather(), &mut buffer).unwrap();
-            String::from_utf8(buffer).unwrap()
-        });
-    
-    tracing::info!("📊 Prometheus metrics server starting on 0.0.0.0:8080");
-    warp::serve(metrics_route)
-        .run(([0, 0, 0, 0], 8080))
-        .await;
+    let port = std::env::var("METRICS_PORT")
+        .unwrap_or_else(|_| "8082".to_string())
+        .parse::<u16>()
+        .unwrap_or(8082);
+
+    tracing::info!("📊 Prometheus metrics server starting on 0.0.0.0:{}", port);
+
+    // Filter to only /metrics endpoint
+    let metrics_route = warp::path("metrics").map(move || {
+        let encoder = TextEncoder::new();
+        let metric_families = REGISTRY.gather();
+        let mut buffer = Vec::new();
+        encoder.encode(&metric_families, &mut buffer).unwrap();
+        String::from_utf8(buffer).unwrap()
+    });
+
+    tokio::spawn(async move {
+        match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+            Ok(listener) => {
+                drop(listener);
+                warp::serve(metrics_route)
+                    .run(([0, 0, 0, 0], port))
+                    .await;
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to start metrics server on port {}: {}. Continuing without metrics.", port, e);
+            }
+        }
+    });
 }

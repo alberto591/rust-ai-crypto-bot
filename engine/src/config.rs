@@ -14,67 +14,32 @@ pub struct PoolConfig {
 }
 
 pub const MONITORED_POOLS: &[PoolConfig] = &[
-    // Triangle 1: SOL → JUP → USDC → SOL
-    PoolConfig {
-        address: pubkey!("3Fy7Py96FXtUtPYs8UPXAYqVjATbcKvN5FJGnSUNckSk"),
-        token_a: SOL_MINT,
-        token_b: JUP_MINT,
-        dex: DexType::Raydium,
-    },
-    PoolConfig {
-        address: pubkey!("5FsNhoCCNqv5pxzpvD8aGBCHCJPxW3FTvPVtD9n1kq4p"),
-        token_a: JUP_MINT,
-        token_b: USDC_MINT,
-        dex: DexType::Raydium,
-    },
-    PoolConfig {
-        address: pubkey!("58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"),
-        token_a: SOL_MINT,
-        token_b: USDC_MINT,
-        dex: DexType::Raydium,
-    },
-    
-    // Triangle 2: SOL → RAY → USDC → SOL
-    PoolConfig {
-        address: pubkey!("AVs9TA4nWDzfPJE9gGVNJMVhcQy3V9PGazuz33BfG2RA"),
-        token_a: RAY_MINT,
-        token_b: SOL_MINT,
-        dex: DexType::Raydium,
-    },
-    PoolConfig {
-        address: pubkey!("6UmmUiYoBjSrhakAobJw8BvkmJtDVxaeBtbt7rxWo1mg"),
-        token_a: RAY_MINT,
-        token_b: USDC_MINT,
-        dex: DexType::Raydium,
-    },
-    
-    // Triangle 3: SOL → BONK → USDC → SOL (volatile, more opportunities)
-    PoolConfig {
-        address: pubkey!("Hm8DswhFx7VKXRJcdZ8bEMZvpVfQZNP6GFtHPvqgmLmD"),
-        token_a: BONK_MINT,
-        token_b: SOL_MINT,
-        dex: DexType::Raydium,
-    },
-    PoolConfig {
-        address: pubkey!("FxgHFpfD9kJWH2x6H5XiDjp2hQJnBGjJ3YLLPHQTwvjE"),
-        token_a: BONK_MINT,
-        token_b: USDC_MINT,
-        dex: DexType::Raydium,
-    },
-    
-    // Triangle 4: SOL → WIF → USDC → SOL (high volatility)
-    PoolConfig {
-        address: pubkey!("EP2ib6dYdEeqD8MfE2ezHCxX3kP3K2eLKkirfPm5eyMx"),
-        token_a: WIF_MINT,
-        token_b: SOL_MINT,
-        dex: DexType::Raydium,
-    },
-    PoolConfig {
-        address: pubkey!("319bvd2jVDbDxUr5KVcLs4wvXpkpZC3ZfCJWXh6NjH8Y"),
-        token_a: WIF_MINT,
-        token_b: USDC_MINT,
-        dex: DexType::Raydium,
-    },
+    // --- 🏮 RAYDIUM CORE (High Volume) ---
+    PoolConfig { address: pubkey!("58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"), token_a: SOL_MINT, token_b: USDC_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("7XJ7EtcbqB3SDeAnpKMf8B2Y4V5SgSjtup3jV5vAnN4"), token_a: SOL_MINT, token_b: USDT_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("AVs9TA4nWDzfPJE9gGVNJMVhcQy3V9PGazuz33BfG2RA"), token_a: RAY_MINT, token_b: SOL_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("3Fy7Py96FXtUtPYs8UPXAYqVjATbcKvN5FJGnSUNckSk"), token_a: SOL_MINT, token_b: JUP_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("Hm8DswhFx7VKXRJcdZ8bEMZvpVfQZNP6GFtHPvqgmLmD"), token_a: BONK_MINT, token_b: SOL_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("EP2ib6dYdEeqD8MfE2ezHCxX3kP3K2eLKkirfPm5eyMx"), token_a: WIF_MINT, token_b: SOL_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("8QaXeHBrShJTdtN1rWCccBxpSVvKksQ2PCu5nufb2zbk"), token_a: POPCAT_MINT, token_b: SOL_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("364rP7Y53NisS9mK4FpXwYF618D3b5YF488888888888"), token_a: JTO_MINT, token_b: SOL_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv"), token_a: PENGU_MINT, token_b: SOL_MINT, dex: DexType::Raydium },
+
+    // --- 🌊 ORCA WHIRLPOOLS (Cross-DEX Targets) ---
+    PoolConfig { address: pubkey!("HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ"), token_a: SOL_MINT, token_b: USDC_MINT, dex: DexType::Orca },
+    PoolConfig { address: pubkey!("5zpyutJu9ee6jFymDGoK7F6S5Kczqtc9FomP3ueKuyA9"), token_a: BONK_MINT, token_b: SOL_MINT, dex: DexType::Orca },
+    PoolConfig { address: pubkey!("7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm"), token_a: JUP_MINT, token_b: SOL_MINT, dex: DexType::Orca },
+    PoolConfig { address: pubkey!("6qgyDW4fHvpTAmfNZvPAuETEbVwRKFVAuuHfNzvEmPkY"), token_a: WIF_MINT, token_b: SOL_MINT, dex: DexType::Orca },
+    PoolConfig { address: pubkey!("8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj"), token_a: JUP_MINT, token_b: USDC_MINT, dex: DexType::Raydium },
+
+    // --- 💎 TRENDING & ARB BRIDGES ---
+    PoolConfig { address: pubkey!("Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"), token_a: SOL_MINT, token_b: USDC_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("FxgHFpfD9kJWH2x6H5XiDjp2hQJnBGjJ3YLLPHQTwvjE"), token_a: BONK_MINT, token_b: USDC_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("319bvd2jVDbDxUr5KVcLs4wvXpkpZC3ZfCJWXh6NjH8Y"), token_a: WIF_MINT, token_b: USDC_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("6UmmUiYoBjSrhakAobJw8BvkmJtDVxaeBtbt7rxWo1mg"), token_a: RAY_MINT, token_b: USDC_MINT, dex: DexType::Raydium },
+    PoolConfig { address: pubkey!("DriFtPZW76QCJj8fT4PkP8An3qcwc7pUnL9f1KxcyxBc"), token_a: SOL_MINT, token_b: DRIFT_MINT, dex: DexType::Raydium }, // DRIFT
+    PoolConfig { address: pubkey!("6UYbX1x8YUcFj8YstPYiZByG7uQzAq2s46ZWphUMkjg5"), token_a: BODEN_MINT, token_b: SOL_MINT, dex: DexType::Raydium },  // BODEN
+    PoolConfig { address: pubkey!("HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ"), token_a: USDC_MINT, token_b: USDT_MINT, dex: DexType::Orca },    // Stable Bridge
 ];
 
 #[derive(Debug, serde::Deserialize, Clone, PartialEq, Default)]
@@ -121,9 +86,21 @@ pub struct BotConfig {
     pub telegram_bot_token: Option<String>,
     #[serde(alias = "TELEGRAM_CHAT_ID")]
     pub telegram_chat_id: Option<String>,
+    #[serde(alias = "MIN_PROFIT_THRESHOLD", default = "default_min_profit")]
+    pub min_profit_threshold_lamports: u64,
+    #[serde(alias = "AI_CONFIDENCE_THRESHOLD", default = "default_ai_confidence")]
+    pub ai_confidence_threshold: f32,
+    #[serde(alias = "KELLY_FRACTION", default = "default_kelly_fraction")]
+    pub kelly_fraction: f32,
+    #[serde(alias = "DATABASE_URL")]
+    pub database_url: Option<String>,
 }
 
-fn default_tip_percentage() -> f64 { 0.5 }
+fn default_min_profit() -> u64 { 20_000 }
+fn default_ai_confidence() -> f32 { 0.8 }
+fn default_kelly_fraction() -> f32 { 0.1 }
+
+fn default_tip_percentage() -> f64 { 0.2 }
 fn default_max_tip() -> u64 { 100_000_000 } // 0.1 SOL
 fn default_volatility_sensitivity() -> f64 { 1.0 }
 fn default_max_slippage_ceiling() -> u16 { 200 } // 2%

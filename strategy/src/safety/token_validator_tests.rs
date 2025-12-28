@@ -42,13 +42,13 @@ mod whitelist_tests {
         let checker = TokenSafetyChecker::new("https://api.mainnet-beta.solana.com");
         let random_token = Pubkey::new_unique();
         let pool = Pubkey::new_unique();
-        
+
         // This will fail due to RPC but we're just testing that it doesn't bypass
         // In a real scenario, non-whitelisted tokens should go through full validation
-        let is_safe = checker.is_safe_to_trade(&random_token, &pool).await;
-        
-        // Since we can't reach RPC in tests, this should return false
+        let result = checker.is_safe_to_trade(&random_token, &pool).await;
+
+        // Since RPC fails for non-existent token, it should return an error
         // The key is that it ATTEMPTED validation instead of bypassing
-        assert!(!is_safe, "Non-whitelisted tokens should run full safety checks");
+        assert!(result.is_err(), "Non-whitelisted tokens should run full safety checks");
     }
 }

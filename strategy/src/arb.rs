@@ -76,7 +76,6 @@ impl ArbFinder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     #[test]
     fn test_find_cycle() {

@@ -1,0 +1,17 @@
+#!/usr/bin/expect -f
+set timeout 30
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+spawn ssh -o StrictHostKeyChecking=no root@$ip "ls -la /usr/bin/protoc && /usr/bin/protoc --version && apt-get install -y protobuf-compiler libprotobuf-dev"
+
+expect "password:"
+send "$password\r"
+
+expect {
+    "protobuf-compiler is already the newest version" { send_user "\nProtobuf already installed\n" }
+    "Setting up protobuf-compiler" { send_user "\nProtobuf installed/repaired\n" }
+    "not found" { send_user "\nProtobuf NOT found in /usr/bin/protoc\n" }
+}
+
+expect eof

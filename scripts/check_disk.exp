@@ -1,0 +1,11 @@
+#!/usr/bin/expect -f
+set timeout 30
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+spawn ssh -o StrictHostKeyChecking=no root@$ip "df -h && du -sh /root/solana-mev-bot/*"
+
+expect "password:"
+send "$password\r"
+
+expect eof

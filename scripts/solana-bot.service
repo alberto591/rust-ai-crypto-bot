@@ -1,0 +1,17 @@
+[Unit]
+Description=Solana MEV HFT Bot Engine
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/solana-mev-bot
+Environment="PROTOC=/usr/bin/protoc"
+ExecStart=/root/solana-mev-bot/target/release/engine --no-tui
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/solana-mev-bot/logs/engine.log
+StandardError=append:/root/solana-mev-bot/logs/engine.log
+
+[Install]
+WantedBy=multi-user.target

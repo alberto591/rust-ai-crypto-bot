@@ -24,9 +24,9 @@ impl RiskManager {
     pub fn new() -> Self {
         Self {
             max_daily_trades: 100,
-            max_daily_volume_lamports: 1_000_000_000, // 1 SOL
+            max_daily_volume_lamports: 2_000_000_000, // 2 SOL
             max_daily_loss_lamports: 50_000_000, // 0.05 SOL
-            max_position_size_lamports: 10_000_000, // 0.01 SOL
+            max_position_size_lamports: 20_000_000, // 0.02 SOL
             max_slippage_bps: 50, // 0.5%
             
             daily_trades: AtomicU32::new(0),

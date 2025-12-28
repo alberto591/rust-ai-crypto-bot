@@ -1,0 +1,22 @@
+#!/usr/bin/expect -f
+set timeout 30
+set password "P*2kY{-YD44j{j(6"
+set ip "149.28.35.68"
+
+# 1. Patch Cargo.toml for lower memory usage during build
+spawn ssh -o StrictHostKeyChecking=no root@$ip "sed -i 's/lto = \"fat\"/lto = \"thin\"/' /root/solana-mev-bot/Cargo.toml && sed -i 's/codegen-units = 1/codegen-units = 16/' /root/solana-mev-bot/Cargo.toml && cat /root/solana-mev-bot/Cargo.toml | grep -E 'lto|codegen-units'"
+expect "password:"
+send "$password\r"
+expect eof
+
+# 2. Resume build with -j 1 for safety
+spawn ssh -o StrictHostKeyChecking=no root@$ip "export PROTOC=/usr/bin/protoc && cd /root/solana-mev-bot && source \$HOME/.cargo/env && PROTOC=/usr/bin/protoc cargo build --release -j 1"
+expect "password:"
+send "$password\r"
+
+set timeout 3600
+expect {
+    "Finished `release` profile" { exit 0 }
+    timeout { exit 1 }
+    eof { exit 0 }
+}
