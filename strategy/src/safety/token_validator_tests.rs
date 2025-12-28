@@ -10,8 +10,8 @@ mod whitelist_tests {
         let usdc = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap();
         let pool = Pubkey::new_unique();
         
-        let is_safe = checker.is_safe_to_trade(&usdc, &pool).await;
-        
+        let is_safe = checker.is_safe_to_trade(&usdc, &pool).await.unwrap();
+
         assert!(is_safe, "USDC should bypass all safety checks");
     }
 
@@ -21,8 +21,8 @@ mod whitelist_tests {
         let usdt = Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB").unwrap();
         let pool = Pubkey::new_unique();
         
-        let is_safe = checker.is_safe_to_trade(&usdt, &pool).await;
-        
+        let is_safe = checker.is_safe_to_trade(&usdt, &pool).await.unwrap();
+
         assert!(is_safe, "USDT should bypass all safety checks");
     }
 
@@ -32,8 +32,8 @@ mod whitelist_tests {
         let wsol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
         let pool = Pubkey::new_unique();
         
-        let is_safe = checker.is_safe_to_trade(&wsol, &pool).await;
-        
+        let is_safe = checker.is_safe_to_trade(&wsol, &pool).await.unwrap();
+
         assert!(is_safe, "Wrapped SOL should bypass all safety checks");
     }
 

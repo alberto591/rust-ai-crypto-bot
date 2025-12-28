@@ -1,12 +1,11 @@
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use spl_token::state::Mint;
-use solana_sdk::program_pack::Pack;
 use std::error::Error;
 use std::str::FromStr;
-use mev_core::raydium::AmmInfo;
 use dashmap::DashMap;
-use tracing::{warn, debug};
+use tracing::{debug, warn};
+
+mod checks;
 
 pub struct TokenSafetyChecker {
     rpc: RpcClient,
@@ -71,97 +70,20 @@ impl TokenSafetyChecker {
     }
 
     async fn run_deep_validation(&self, mint: &Pubkey, pool_id: &Pubkey) -> bool {
-        if let Ok(false) = self.check_authorities(mint).await { return false; }
-        if let Ok(false) = self.check_holder_distribution(mint).await { return false; }
-        if let Ok(false) = self.check_liquidity_depth(pool_id).await { return false; }
-        
-        match self.check_lp_status(pool_id).await {
+        if let Ok(false) = checks::check_authorities(&self.rpc, mint).await { return false; }
+        if let Ok(false) = checks::check_holder_distribution(&self.rpc, mint).await { return false; }
+        if let Ok(false) = checks::check_liquidity_depth(&self.rpc, pool_id, self.min_liquidity_lamports).await { return false; }
+
+        match checks::check_lp_status(&self.rpc, pool_id, &self.burn_addresses).await {
             Ok(true) => true,
             Ok(false) => {
                 // Secondary check: If it's Orca Whirlpool (no LP mint to burn), assume safe if in monitored pools
-                true 
+                true
             },
             Err(_) => false,
         }
     }
 
-    async fn check_authorities(&self, mint: &Pubkey) -> Result<bool, Box<dyn Error>> {
-        let account = self.rpc.get_account(mint).await?;
-        let mint_data = Mint::unpack(&account.data)?;
-        Ok(mint_data.mint_authority.is_none() && mint_data.freeze_authority.is_none())
-    }
-
-    async fn check_holder_distribution(&self, mint: &Pubkey) -> Result<bool, Box<dyn Error>> {
-        let largest_accounts = self.rpc.get_token_largest_accounts(mint).await?;
-        if let Some(top_holder) = largest_accounts.first() {
-            let supply_resp = self.rpc.get_token_supply(mint).await?;
-            let supply = supply_resp.amount.parse::<u64>().unwrap_or(0);
-            let top_balance = top_holder.amount.amount.parse::<u64>().unwrap_or(0);
-            
-            if supply > 0 && (top_balance as f64 / supply as f64) > 0.85 {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    async fn check_lp_status(&self, pool_id: &Pubkey) -> Result<bool, Box<dyn Error>> {
-        let account = match self.rpc.get_account(pool_id).await {
-            Ok(acc) => acc,
-            Err(_) => return Ok(false),
-        };
-        
-        if let Ok(amm_info) = bytemuck::try_from_bytes::<AmmInfo>(&account.data) {
-            let lp_mint = amm_info.lp_mint();
-            let supply_resp = self.rpc.get_token_supply(&lp_mint).await?;
-            let total_supply = supply_resp.amount.parse::<u64>().unwrap_or(0);
-            
-            if total_supply == 0 { return Ok(true); }
-
-            let mut burned_amount = 0u64;
-            for burn_addr in &self.burn_addresses {
-                let ata = spl_associated_token_account::get_associated_token_address(burn_addr, &lp_mint);
-                if let Ok(balance_resp) = self.rpc.get_token_account_balance(&ata).await {
-                    if let Ok(balance) = balance_resp.amount.parse::<u64>() {
-                        burned_amount += balance;
-                    }
-                }
-            }
-            return Ok((burned_amount as f64 / total_supply as f64) > 0.90);
-        }
-        Ok(false)
-    }
-
-    async fn check_liquidity_depth(&self, pool_id: &Pubkey) -> Result<bool, Box<dyn Error>> {
-        let account = self.rpc.get_account(pool_id).await?;
-        
-        // For Raydium pools, use the accessor methods from AmmInfo
-        if account.data.len() >= 752 {
-            if let Ok(amm_info) = bytemuck::try_from_bytes::<AmmInfo>(&account.data) {
-                let base_vault = amm_info.base_vault();
-                let quote_vault = amm_info.quote_vault();
-                
-                // Check if either vault has sufficient liquidity
-                if let Ok(base_balance) = self.rpc.get_balance(&base_vault).await {
-                    if base_balance >= self.min_liquidity_lamports {
-                        return Ok(true);
-                    }
-                }
-                
-                if let Ok(quote_balance) = self.rpc.get_balance(&quote_vault).await {
-                    if quote_balance >= self.min_liquidity_lamports {
-                        return Ok(true);
-                    }
-                }
-                
-                warn!("⚠️ Pool {} has insufficient liquidity", pool_id);
-                return Ok(false);
-            }
-        }
-        
-        // For other pool types or if parsing fails, assume safe (will be caught by other checks)
-        Ok(true)
-    }
 
     // Exposed for testing
     #[cfg(test)]
