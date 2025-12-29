@@ -23,6 +23,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 yellowstone-grpc-client = { version = "1.13", default-features = false }
 num_cpus = "1.16"
+dashmap = "6.1.0"
 solana-account-decoder = "1.17"
 async-trait = "0.1"
 dotenvy = "0.15"
@@ -47,7 +48,8 @@ spl-associated-token-account = "2.3.0"
 anyhow = "1.0"
 prometheus = "0.13"
 lazy_static = "1.4"
-warp = "0.3"
+axum = "0.7"
+tower-http = { version = "0.5", features = ["tracing"] }
 reqwest = { version = "0.11", features = ["json"] }
 tokio-postgres = "0.7"
 deadpool-postgres = "0.12"

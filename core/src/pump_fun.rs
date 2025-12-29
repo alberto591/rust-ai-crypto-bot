@@ -39,6 +39,41 @@ impl PumpFunBondingCurve {
         
         cost as u64
     }
+
+    /// Manual deserialization to handle variable account sizes (49 or 137 bytes)
+    /// Reads only the fields we need, ignoring extra bytes
+    pub fn from_account_data(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 41 {
+            return Err(format!("Account too small: {} bytes (need at least 41)", data.len()));
+        }
+        
+        // Read fields in order (little-endian u64s)
+        let virtual_token_reserves = u64::from_le_bytes(
+            data[0..8].try_into().map_err(|e| format!("Failed to read virtual_token_reserves: {}", e))?
+        );
+        let virtual_sol_reserves = u64::from_le_bytes(
+            data[8..16].try_into().map_err(|e| format!("Failed to read virtual_sol_reserves: {}", e))?
+        );
+        let real_token_reserves = u64::from_le_bytes(
+            data[16..24].try_into().map_err(|e| format!("Failed to read real_token_reserves: {}", e))?
+        );
+        let real_sol_reserves = u64::from_le_bytes(
+            data[24..32].try_into().map_err(|e| format!("Failed to read real_sol_reserves: {}", e))?
+        );
+        let token_total_supply = u64::from_le_bytes(
+            data[32..40].try_into().map_err(|e| format!("Failed to read token_total_supply: {}", e))?
+        );
+        let complete = data[40] != 0;
+        
+        Ok(Self {
+            virtual_token_reserves,
+            virtual_sol_reserves,
+            real_token_reserves,
+            real_sol_reserves,
+            token_total_supply,
+            complete,
+        })
+    }
 }
 
 #[cfg(test)]

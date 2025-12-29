@@ -14,62 +14,86 @@ pub struct SwapPath {
 pub struct ArbFinder;
 
 impl ArbFinder {
-    /// Finds the best 3-hop cycle starting from `start_token`
-    /// 
-    /// # Arguments
-    /// * `graph` - The market graph state
-    /// * `start_token` - The base token to arb (e.g., SOL or USDC)
-    /// * `amount_in` - Initial input amount
-    /// 
-    /// # Returns
-    /// The most profitable `SwapPath` found, or None if no valid cycle exists.
+    /// Finds the best cycle up to `max_hops` starting from `start_token`
     pub fn find_best_cycle(
         graph: &MarketGraph,
         start_token: Pubkey,
         amount_in: u64,
+        max_hops: u8,
     ) -> Option<SwapPath> {
         let mut best_path: Option<SwapPath> = None;
-        let mut max_profit = 0_i64;
+        let mut visited = Vec::new();
+        let mut current_hops = Vec::new();
+        
+        Self::find_cycles_recursive(
+            graph,
+            start_token,
+            start_token,
+            amount_in,
+            amount_in,
+            max_hops,
+            &mut visited,
+            &mut current_hops,
+            &mut best_path,
+        );
 
-        // Step 1: Find all neighbors of Start (Hop 1: Start -> B)
-        if let Some(edges_1) = graph.adj.get(&start_token) {
-            for edge_1 in edges_1 {
-                let amt_1 = graph.get_amount_out(edge_1, amount_in);
-                if amt_1 == 0 { continue; }
+        best_path
+    }
 
-                // Step 2: Find neighbors of Hop 1 (Hop 2: B -> C)
-                if let Some(edges_2) = graph.adj.get(&edge_1.to_token) {
-                    for edge_2 in edges_2 {
-                        // Optimization: Don't go back to start immediately (A->B->A is just a sandwich/ping-pong)
-                        if edge_2.to_token == start_token { continue; }
+    fn find_cycles_recursive(
+        graph: &MarketGraph,
+        current_token: Pubkey,
+        start_token: Pubkey,
+        current_amount: u64,
+        initial_amount: u64,
+        remaining_hops: u8,
+        visited: &mut Vec<Pubkey>,
+        current_path: &mut Vec<Edge>,
+        best_path: &mut Option<SwapPath>,
+    ) {
+        if remaining_hops == 0 {
+            return;
+        }
 
-                        let amt_2 = graph.get_amount_out(edge_2, amt_1);
-                        if amt_2 == 0 { continue; }
+        if let Some(edges) = graph.adj.get(&current_token) {
+            for edge in edges {
+                let amount_out = graph.get_amount_out(edge, current_amount);
+                if amount_out == 0 { continue; }
 
-                        // Step 3: Find path back to Start (Hop 3: C -> Start)
-                        if let Some(edges_3) = graph.adj.get(&edge_2.to_token) {
-                            for edge_3 in edges_3 {
-                                if edge_3.to_token == start_token {
-                                    let final_amt = graph.get_amount_out(edge_3, amt_2);
-                                    
-                                    let profit = final_amt as i64 - amount_in as i64;
-                                    
-                                    // Found a profitable path?
-                                    if profit > max_profit {
-                                        max_profit = profit;
-                                        best_path = Some(SwapPath {
-                                            hops: vec![edge_1.clone(), edge_2.clone(), edge_3.clone()],
-                                            expected_profit: profit,
-                                        });
-                                    }
-                                }
-                            }
-                        }
+                // Pruning: if current_amount is significantly lower than initial and few hops left
+                // (Very aggressive pruning can be added here once we have slippage/fees accounted for)
+
+                if edge.to_token == start_token {
+                    let profit = amount_out as i64 - initial_amount as i64;
+                    if profit > best_path.as_ref().map_or(0, |p| p.expected_profit) {
+                        let mut final_path = current_path.clone();
+                        final_path.push(edge.clone());
+                        *best_path = Some(SwapPath {
+                            hops: final_path,
+                            expected_profit: profit,
+                        });
                     }
+                } else if !visited.contains(&edge.to_token) {
+                    visited.push(edge.to_token);
+                    current_path.push(edge.clone());
+                    
+                    Self::find_cycles_recursive(
+                        graph,
+                        edge.to_token,
+                        start_token,
+                        amount_out,
+                        initial_amount,
+                        remaining_hops - 1,
+                        visited,
+                        current_path,
+                        best_path,
+                    );
+                    
+                    current_path.pop();
+                    visited.pop();
                 }
             }
         }
-        best_path
     }
 }
 
@@ -100,13 +124,34 @@ mod tests {
         // With these reserves, pumping 1 SOL in should get > 1 SOL out
         graph.update_edge(token_bonk, token_sol, pool_3, mev_core::constants::RAYDIUM_V4_PROGRAM, 1_000_000_000_000, 1_100_000_000, None, None); 
 
-        // Run search with 1 SOL input
-        let path = ArbFinder::find_best_cycle(&graph, token_sol, 1_000_000); // 0.001 SOL test
+        // Run search with 1 SOL input and 3 hops
+        let path = ArbFinder::find_best_cycle(&graph, token_sol, 1_000_000, 3); // 0.001 SOL test
         
         // Should find a path
         assert!(path.is_some());
         let p = path.unwrap();
         assert_eq!(p.hops.len(), 3);
         assert!(p.expected_profit > 0);
+    }
+
+    #[test]
+    fn test_find_4_hop_cycle() {
+        let mut graph = MarketGraph::new();
+        let t1 = Pubkey::new_unique();
+        let t2 = Pubkey::new_unique();
+        let t3 = Pubkey::new_unique();
+        let t4 = Pubkey::new_unique();
+        let p = mev_core::constants::RAYDIUM_V4_PROGRAM;
+
+        // Path: T1 -> T2 -> T3 -> T4 -> T1
+        // (Large reserves to avoid price impact in test)
+        graph.update_edge(t1, t2, Pubkey::new_unique(), p, 1_000_000_000, 1_100_000_000, None, None);
+        graph.update_edge(t2, t3, Pubkey::new_unique(), p, 1_000_000_000, 1_100_000_000, None, None);
+        graph.update_edge(t3, t4, Pubkey::new_unique(), p, 1_000_000_000, 1_100_000_000, None, None);
+        graph.update_edge(t4, t1, Pubkey::new_unique(), p, 1_000_000_000, 1_100_000_000, None, None);
+
+        let path = ArbFinder::find_best_cycle(&graph, t1, 100, 4);
+        assert!(path.is_some());
+        assert_eq!(path.unwrap().hops.len(), 4);
     }
 }

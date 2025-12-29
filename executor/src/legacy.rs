@@ -169,6 +169,14 @@ impl strategy::ports::PoolKeyProvider for LegacyExecutor {
             Err(anyhow::anyhow!("No PoolKeyProvider configured for LegacyExecutor"))
         }
     }
+
+    async fn get_meteora_keys(&self, pool_address: &solana_sdk::pubkey::Pubkey) -> anyhow::Result<mev_core::meteora::MeteoraSwapKeys> {
+        if let Some(provider) = &self.key_provider {
+            provider.get_meteora_keys(pool_address).await
+        } else {
+            Err(anyhow::anyhow!("No PoolKeyProvider configured for LegacyExecutor"))
+        }
+    }
 }
 
 #[async_trait::async_trait]

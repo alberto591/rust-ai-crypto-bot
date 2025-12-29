@@ -23,6 +23,7 @@ pub enum SimulationError {
 
 pub struct Simulator {
     rpc_client: Arc<RpcClient>,
+    cached_blockhash: std::sync::Mutex<Option<(solana_sdk::hash::Hash, std::time::Instant)>>,
 }
 
 #[async_trait::async_trait]
@@ -40,7 +41,10 @@ impl strategy::BundleSimulator for Simulator {
 
 impl Simulator {
     pub fn new(rpc_client: Arc<RpcClient>) -> Self {
-        Self { rpc_client }
+        Self { 
+            rpc_client,
+            cached_blockhash: std::sync::Mutex::new(None),
+        }
     }
 
     pub async fn simulate_bundle_internal(
@@ -50,10 +54,25 @@ impl Simulator {
     ) -> Result<u64, SimulationError> {
         debug!("Simulating bundle with {} instructions", instructions.len());
 
-        // 1. Build Versioned Transaction for simulation
-        // Use a dummy blockhash as it's just for simulation
-        let recent_blockhash = self.rpc_client.get_latest_blockhash()
-            .map_err(SimulationError::RpcError)?;
+        // 🛡️ BATCH OPTIMIZATION: Cache blockhash for 30s to save RPC credits
+        let recent_blockhash = {
+            let mut cache = self.cached_blockhash.lock().unwrap();
+            if let Some((hash, ts)) = *cache {
+                if ts.elapsed() < std::time::Duration::from_secs(30) {
+                    hash
+                } else {
+                    let hash = self.rpc_client.get_latest_blockhash()
+                        .map_err(SimulationError::RpcError)?;
+                    *cache = Some((hash, std::time::Instant::now()));
+                    hash
+                }
+            } else {
+                let hash = self.rpc_client.get_latest_blockhash()
+                    .map_err(SimulationError::RpcError)?;
+                *cache = Some((hash, std::time::Instant::now()));
+                hash
+            }
+        };
         
         let message = Message::try_compile(
             payer,

@@ -14,3 +14,5 @@ rkyv = { version = "0.7", features = ["validation"] }
 bytemuck = { version = "1.14", features = ["derive"] }
 smallvec = { version = "1.11", features = ["serde"] }
 borsh = "1.6.0"
+prometheus = "0.13"
+lazy_static = "1.4"

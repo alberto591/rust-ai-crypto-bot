@@ -19,6 +19,7 @@ pub trait AIModelPort: Send + Sync {
 pub trait PoolKeyProvider: Send + Sync {
     async fn get_swap_keys(&self, pool_address: &Pubkey) -> Result<mev_core::raydium::RaydiumSwapKeys>;
     async fn get_orca_keys(&self, pool_address: &Pubkey) -> Result<mev_core::orca::OrcaSwapKeys>;
+    async fn get_meteora_keys(&self, pool_address: &Pubkey) -> Result<mev_core::meteora::MeteoraSwapKeys>;
 }
 
 /// Port for bundle execution services
@@ -62,6 +63,8 @@ pub trait TelemetryPort: Send + Sync {
     fn log_profit_sanity_rejection(&self);
     fn log_safety_rejection(&self);
     fn log_rug_rejection(&self);
+    fn log_dna_rejection(&self);
+    fn log_elite_match(&self);
     fn log_slippage_rejection(&self);
     fn log_execution_attempt(&self);
     fn log_jito_success(&self);
@@ -73,6 +76,9 @@ pub trait TelemetryPort: Send + Sync {
     fn log_endpoint_success(&self, endpoint_index: usize);
     fn log_realized_pnl(&self, lamports: i64);
     
+    /// NEW: Comprehensive landed trade reporting (Phase 3 Hardening)
+    fn log_trade_landed(&self, opportunity: ArbitrageOpportunity, signature: String, success: bool);
+    
     // Getters for Risk Management
     fn get_total_loss(&self) -> u64;
     fn get_win_rate(&self) -> f32;
@@ -83,9 +89,12 @@ pub trait MarketIntelligencePort: Send + Sync {
     /// Check if a token address is a known false positive or blacklisted
     async fn is_blacklisted(&self, token_address: &Pubkey) -> Result<bool>;
 
+    /// Save a confirmed success story to the database (Phase 3 Hardening)
+    async fn save_story(&self, story: mev_core::SuccessStory) -> Result<()>;
+
     /// Get high-level analysis of success stories (the "Success DNA")
     async fn get_success_analysis(&self) -> Result<mev_core::SuccessAnalysis>;
 
     /// Check if a token matching specific DNA traits should be traded
-    async fn match_dna(&self, dna: &mev_core::TokenDNA) -> Result<bool>;
+    async fn match_dna(&self, dna: &mev_core::TokenDNA) -> Result<mev_core::DNAMatch>;
 }

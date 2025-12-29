@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use dotenvy::dotenv;
 use solana_sdk::signature::{read_keypair_file, Signer};
 use solana_sdk::pubkey::Pubkey;
-use tracing::{info, error, warn};
+use tracing::{info, error, warn, debug};
 // use futures_util::future;
 
 // Internal Crates
@@ -28,6 +28,7 @@ mod intelligence;
 mod discovery;
 mod birth_watcher;
 mod watcher;
+mod scoring;
 
 use crate::intelligence::MarketIntelligence;
 use crate::wallet_manager::WalletManager;
@@ -108,10 +109,52 @@ async fn main() -> anyhow::Result<()> {
     };
     info!("🔑 Identity: {}", payer.pubkey());
 
-    // 4.2 Initialize Shared Infrastructure (Base Layer)
+    // --- COMPOSITION ROOT SETUP ---
+    
+    // 1. Initialize Database & Market Intelligence FIRST (Phase 3 Hardening)
+    let db_pool = if let Ok(db_url) = std::env::var("DATABASE_URL") {
+        let pg_config = tokio_postgres::Config::from_str(&db_url);
+        match pg_config {
+            Ok(conf) => {
+                let mgr = deadpool_postgres::Manager::new(conf, tokio_postgres::NoTls);
+                let pool = deadpool_postgres::Pool::builder(mgr)
+                    .max_size(5)
+                    .build();
+                match pool {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        error!("❌ Failed to build Postgres Pool: {}. Falling back to file storage.", e);
+                        None
+                    }
+                }
+            },
+            Err(e) => {
+                error!("❌ Invalid DATABASE_URL: {}. Falling back to file storage.", e);
+                None
+            }
+        }
+    } else {
+        warn!("⚠️ DATABASE_URL not set. Success Library will use file fallback.");
+        None
+    };
+
+    let intel_impl = Arc::new(intelligence::DatabaseIntelligence::new(db_pool.clone()));
+    let intel_port: Arc<dyn strategy::ports::MarketIntelligencePort> = Arc::clone(&intel_impl) as Arc<dyn strategy::ports::MarketIntelligencePort>;
+    let intelligence_mgr: Arc<dyn MarketIntelligence> = Arc::clone(&intel_impl) as Arc<dyn MarketIntelligence>;
+    let scoring_engine = Arc::new(scoring::PoolScoringEngine::new(db_pool.clone()));
+
+    // 1.1 Initialize Scoring DB & Load Weights
+    if let Err(e) = scoring_engine.init_db().await {
+        error!("❌ Failed to initialize scoring DB: {}", e);
+    }
+    if let Err(e) = scoring_engine.load_from_db().await {
+        error!("❌ Failed to load scores from DB: {}", e);
+    }
+
+    // 2. Initialize Telemetry & Metrics (with Intelligence reference)
     info!("🔌 Connecting to RPC: {}...", bot_cfg.rpc_url);
+    let metrics = Arc::new(metrics::BotMetrics::new(Some(Arc::clone(&intel_port))));
     let pool_fetcher = Arc::new(pool_fetcher::PoolKeyFetcher::new(&bot_cfg.rpc_url));
-    let metrics = Arc::new(metrics::BotMetrics::new());
     let risk_mgr = Arc::new(risk::RiskManager::new());
 
     // 4.3 Initialize Performance & Safety
@@ -134,6 +177,8 @@ async fn main() -> anyhow::Result<()> {
             &bot_cfg.jito_url,
             &payer,
             &bot_cfg.rpc_url,
+            bot_cfg.helius_sender_url.clone(),
+            bot_cfg.fee_strategy.clone(),
             Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
             Some(Arc::clone(&metrics) as Arc<dyn strategy::ports::TelemetryPort>),
         ).await {
@@ -149,48 +194,23 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     
-    // 4.3.5 Initialize Success Library Infrastructure (Early for Feedback Loop)
-    let db_pool = if let Some(url) = &bot_cfg.database_url {
-        let pg_config = tokio_postgres::Config::from_str(url)
-            .map_err(|e| format!("Invalid DATABASE_URL: {}", e));
-        
-        match pg_config {
-            Ok(conf) => {
-                let mgr = deadpool_postgres::Manager::new(conf, tokio_postgres::NoTls);
-                let pool = deadpool_postgres::Pool::builder(mgr)
-                    .max_size(5)
-                    .build();
-                
-                match pool {
-                    Ok(p) => {
-                        info!("✅ Initialized SUCCESS LIBRARY Database Pool (PostgreSQL)");
-                        Some(p)
-                    },
-                    Err(e) => {
-                        error!("❌ Failed to build Postgres Pool: {}. Falling back to file storage.", e);
-                        None
-                    }
-                }
-            },
-            Err(e) => {
-                error!("❌ {}. Falling back to file storage.", e);
-                None
-            }
-        }
-    } else {
-        warn!("⚠️ DATABASE_URL not set. Success Library will use file fallback.");
-        None
-    };
-
-    let intel_impl = Arc::new(intelligence::DatabaseIntelligence::new(db_pool));
-    let intelligence_mgr: Arc<dyn MarketIntelligence> = intel_impl.clone();
-    let intel_port: Arc<dyn strategy::ports::MarketIntelligencePort> = intel_impl;
 
     // 4.5 Initialize Strategy Engine (The Brain)
+    let ai_model = match strategy::adapters::ONNXModelAdapter::from_file("ai_model.onnx") {
+        Ok(model) => {
+            info!("🧠 AI Model loaded successfully (ai_model.onnx)");
+            Some(Arc::new(model) as Arc<dyn strategy::ports::AIModelPort>)
+        }
+        Err(e) => {
+            warn!("⚠️ Failed to load AI model: {}. Running in heuristic mode.", e);
+            None
+        }
+    };
+
     let engine = Arc::new(StrategyEngine::new(
         Some(execution_port),
         None, // No simulation in prod
-        None, // No AI model yet
+        ai_model,
         Some(Arc::clone(&performance_tracker)),
         Some(Arc::clone(&safety_checker)),
         Some(Arc::clone(&metrics) as Arc<dyn strategy::ports::TelemetryPort>),
@@ -210,14 +230,18 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let alert_mgr = Arc::new(alerts::AlertManager::new(bot_cfg.discord_webhook.clone(), telegram_config));
+    let alert_mgr = Arc::new(alerts::AlertManager::new(
+        bot_cfg.discord_webhook.clone(), 
+        telegram_config,
+        bot_cfg.ntfy_topic.clone(),
+    ));
     tracing::info!("🔔 Alerting configured: Discord={}, Telegram={}", 
         bot_cfg.discord_webhook.is_some(),
         bot_cfg.telegram_bot_token.is_some() && bot_cfg.telegram_chat_id.is_some()
     );
 
     // 4.3.6 Initialize Telemetry
-    telemetry::init_metrics();
+    mev_core::telemetry::init_metrics();
     tokio::spawn(telemetry::serve_metrics());
     
     // Start health monitor (status checks every 5 minutes + hourly summary)
@@ -236,6 +260,18 @@ async fn main() -> anyhow::Result<()> {
         payer.pubkey(),
         bot_start_time
     ));
+
+    // Start 5-minute periodic weight sync (PostgreSQL)
+    let scoring_engine_sync = Arc::clone(&scoring_engine);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            if let Err(e) = scoring_engine_sync.sync_to_db().await {
+                error!("❌ Failed to sync pool weights: {}", e);
+            }
+        }
+    });
 
     // Start 5-minute periodic reporting (Log-based)
     let metrics_clone = Arc::clone(&metrics);
@@ -329,7 +365,7 @@ async fn main() -> anyhow::Result<()> {
     info!("📊 -------------------------------");
     
     let (tx, _rx) = tokio::sync::broadcast::channel::<mev_core::MarketUpdate>(1024);
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    let (shutdown_tx, _shutdown_rx) = mpsc::channel::<()>(1);
     
     // 6.5. TUI Dashboard (Real-time Monitoring) - MOVED UP
     let no_tui = env::args().any(|a| a == "--no-tui");
@@ -364,7 +400,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 5.5 Network Ingestion (Unified MarketWatcher)
-    let (sub_tx, sub_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_sub_tx, sub_rx) = tokio::sync::mpsc::unbounded_channel();
     let (discovery_tx, discovery_rx) = mpsc::channel(128);
     
     let args: Vec<String> = env::args().collect();
@@ -380,6 +416,7 @@ async fn main() -> anyhow::Result<()> {
     let tui_watcher = Arc::clone(&tui_state);
     let monitored_pools = pools_to_watch.clone();
 
+    let scoring_engine_watcher = Arc::clone(&scoring_engine);
     tokio::spawn(async move {
         watcher::start_market_watcher(
             ws_url,
@@ -388,7 +425,8 @@ async fn main() -> anyhow::Result<()> {
             market_tx_watcher,
             Some(tui_watcher),
             monitored_pools,
-            sub_rx
+            sub_rx,
+            scoring_engine_watcher,
         ).await;
     });
 
@@ -498,7 +536,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let start_time = std::time::Instant::now();
-                println!("⏱️ START process_event at {:?}", start_time);
+                debug!("⏱️ START process_event at {:?}", start_time);
                 let processing_result = ctx.engine.process_event(
                     domain_update, 
                     ctx.config.default_trade_size_lamports,
@@ -510,11 +548,12 @@ async fn main() -> anyhow::Result<()> {
                     ctx.config.max_slippage_ceiling,
                     ctx.config.min_profit_threshold_lamports,
                     ctx.config.ai_confidence_threshold,
-                    ctx.config.sanity_profit_factor
+                    ctx.config.sanity_profit_factor,
+                    ctx.config.max_hops
                 ).await;
                 
                 let duration = start_time.elapsed().as_millis() as f64;
-                println!("⏱️ END process_event. Duration: {}ms", duration);
+                debug!("⏱️ END process_event. Duration: {}ms", duration);
                 telemetry::DETECTION_LATENCY.observe(duration);
 
                 match processing_result {
@@ -531,6 +570,13 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         ctx.metrics.log_opportunity(true);
+                        
+                        // Notify via Alerts
+                        let am = Arc::clone(&ctx.alert_mgr);
+                        let opp_clone = opportunity.clone();
+                        tokio::spawn(async move {
+                            am.send_trade_notification(&opp_clone, "Success (See Logs)").await;
+                        });
                         
                         // Push to TUI
                         {
@@ -561,15 +607,30 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 8. The Idle Monitor
+    // --- GRACEFUL SHUTDOWN HANDLER ---
     tokio::select! {
-        _ = shutdown_rx.recv() => {
-            info!("👋 Engine shutting down gracefully...");
-            context.metrics.print_summary();
-            context.alert_mgr.send_final_report(Arc::clone(&context.metrics), bot_start_time).await;
-            info!("Goodbye!");
+        _ = tokio::signal::ctrl_c() => {
+            info!("🛑 Received SIGINT (Ctrl+C). Initiating graceful shutdown...");
         }
+        _ = async {
+            #[cfg(unix)]
+            {
+                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+                term.recv().await;
+                info!("🛑 Received SIGTERM. Initiating graceful shutdown...");
+            }
+            #[cfg(not(unix))]
+            {
+                std::future::pending::<()>().await;
+            }
+        } => {}
     }
+
+    info!("👋 Engine shutting down gracefully...");
+    let _ = scoring_engine.sync_to_db().await;
+    context.metrics.print_summary();
+    context.alert_mgr.send_final_report(Arc::clone(&context.metrics), bot_start_time).await;
+    info!("Goodbye!");
     
     Ok(())
 }

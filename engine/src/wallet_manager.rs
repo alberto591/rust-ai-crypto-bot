@@ -96,7 +96,7 @@ impl WalletManager {
         // RPC get_multiple_accounts limit is typically 100
         for chunk in atas.chunks(100) {
             let accounts = self.rpc.get_multiple_accounts(chunk).await?;
-            for (i, account_opt) in accounts.into_iter().enumerate() {
+            for (_i, account_opt) in accounts.into_iter().enumerate() {
                 let mint = mints[results.len()];
                 let balance = if let Some(account) = account_opt {
                     if let Ok(token_account) = spl_token::state::Account::unpack(&account.data) {

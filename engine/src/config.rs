@@ -1,8 +1,8 @@
 use std::env;
-use serde::Deserialize;
+// use serde::Deserialize;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::pubkey;
-use mev_core::DexType;
+use mev_core::{DexType, FeeStrategy};
 use mev_core::constants::*;
 
 #[derive(Debug, Clone)]
@@ -48,6 +48,7 @@ pub enum ExecutionMode {
     Simulation,      // 🛡️
     LiveMicro,       // 🧪 (Max 0.02 SOL)
     LiveProduction,  // 🚀 (Full Risk)
+
 }
 
 #[derive(Debug, serde::Deserialize, Clone)]
@@ -98,18 +99,38 @@ pub struct BotConfig {
     pub min_liquidity_lamports: u64,
     #[serde(alias = "SANITY_PROFIT_FACTOR", default = "default_sanity_profit_factor")]
     pub sanity_profit_factor: u64,
+    #[serde(alias = "NTFY_TOPIC")]
+    pub ntfy_topic: Option<String>,
+    #[serde(alias = "HELIUS_SENDER_URL")]
+    pub helius_sender_url: Option<String>,
+    #[serde(alias = "FEE_STRATEGY", default)]
+    pub fee_strategy: FeeStrategy,
+    #[serde(alias = "MAX_HOPS", default = "default_max_hops")]
+    pub max_hops: u8,
+    #[serde(alias = "MAX_LIQUIDITY_USD", default = "default_max_liquidity_usd")]
+    pub max_liquidity_usd: u64,
+    #[serde(alias = "EXCLUDED_MINTS", default = "default_excluded_mints")]
+    pub excluded_mints: Vec<String>,
 }
 
-fn default_min_profit() -> u64 { 1 }
-fn default_ai_confidence() -> f32 { 0.8 }
+fn default_min_profit() -> u64 { 30_000 } // Lowered to 30k for better hit rate
+fn default_ai_confidence() -> f32 { 0.7 } // Lowered to 0.7 (was 0.8)
 fn default_kelly_fraction() -> f32 { 0.1 }
-fn default_min_liquidity() -> u64 { 10_000_000_000 } // 10 SOL
+fn default_min_liquidity() -> u64 { 5_000_000_000 } // 5 SOL (was 10 SOL)
 fn default_sanity_profit_factor() -> u64 { 100 } // 100x
 
-fn default_tip_percentage() -> f64 { 0.2 }
+fn default_tip_percentage() -> f64 { 0.15 }
 fn default_max_tip() -> u64 { 100_000_000 } // 0.1 SOL
 fn default_volatility_sensitivity() -> f64 { 1.0 }
 fn default_max_slippage_ceiling() -> u16 { 200 } // 2%
+fn default_max_hops() -> u8 { 5 }
+fn default_max_liquidity_usd() -> u64 { 200_000 } // Cap filtering at $200k to avoid HFT
+fn default_excluded_mints() -> Vec<String> {
+    vec![
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(), // USDC
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB".to_string(), // USDT
+    ]
+}
 
 impl BotConfig {
     #[allow(dead_code)]

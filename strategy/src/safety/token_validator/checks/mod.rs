@@ -6,11 +6,12 @@ pub mod holder_distribution;
 pub mod lp_status;
 pub mod liquidity_depth;
 
-pub use authorities::check_authorities;
-pub use holder_distribution::check_holder_distribution;
-pub use lp_status::check_lp_status;
-pub use liquidity_depth::check_liquidity_depth;
+pub use authorities::*;
+pub use holder_distribution::*;
+pub use lp_status::*;
+pub use liquidity_depth::*;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum TokenValidationError {
     RpcError(String),

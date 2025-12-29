@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 use tracing::info;
 
@@ -46,6 +47,9 @@ pub struct BotMetrics {
     
     // Remote Control State - NEW: V2
     pub is_paused: std::sync::atomic::AtomicBool, 
+    
+    // Success Library Integration (Phase 3 Hardening)
+    pub intel: Option<Arc<dyn strategy::ports::MarketIntelligencePort>>,
 }
 
 impl strategy::ports::TelemetryPort for BotMetrics {
@@ -60,6 +64,12 @@ impl strategy::ports::TelemetryPort for BotMetrics {
     }
     fn log_rug_rejection(&self) {
         self.log_rug_rejection();
+    }
+    fn log_dna_rejection(&self) {
+        crate::telemetry::OPPORTUNITIES_NON_DNA_TOTAL.inc();
+    }
+    fn log_elite_match(&self) {
+        crate::telemetry::DNA_ELITE_MATCHES_TOTAL.inc();
     }
     fn log_slippage_rejection(&self) {
         self.log_slippage_rejection();
@@ -96,6 +106,44 @@ impl strategy::ports::TelemetryPort for BotMetrics {
         }
     }
 
+    fn log_trade_landed(&self, opportunity: mev_core::ArbitrageOpportunity, _signature: String, success: bool) {
+        let lamports = opportunity.expected_profit_lamports;
+        if success {
+            self.total_profit_lamports.fetch_add(lamports, Ordering::SeqCst);
+            
+            // 🚀 Save Success Story (Async bridge)
+            if let Some(intel) = &self.intel {
+                let intel_clone = Arc::clone(intel);
+                let story = mev_core::SuccessStory {
+                    strategy_id: "momentum_sniper_v1".to_string(),
+                    token_address: opportunity.steps.last().map(|s| s.output_mint.to_string()).unwrap_or_default(),
+                    market_context: "Live_Execution".to_string(),
+                    lesson: "Confirmed_Trade".to_string(),
+                    timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                    liquidity_min: opportunity.initial_liquidity_lamports.unwrap_or(opportunity.min_liquidity as u64),
+                    has_twitter: false, // Metadata to be enriched later
+                    mint_renounced: true, 
+                    initial_market_cap: 0, 
+                    peak_roi: 0.0, 
+                    time_to_peak_secs: 0,
+                    drawdown: 0.0,
+                    is_false_positive: false,
+                    holder_count_at_peak: None,
+                    market_volatility: None,
+                    launch_hour_utc: opportunity.launch_hour_utc,
+                };
+                
+                tokio::spawn(async move {
+                    if let Err(e) = intel_clone.save_story(story).await {
+                        tracing::error!("❌ Failed to save success story to library: {}", e);
+                    }
+                });
+            }
+        } else {
+            self.total_loss_lamports.fetch_add(lamports, Ordering::SeqCst);
+        }
+    }
+
     fn get_total_loss(&self) -> u64 {
         self.total_loss_lamports.load(Ordering::SeqCst)
     }
@@ -112,7 +160,7 @@ impl strategy::ports::TelemetryPort for BotMetrics {
 }
 
 impl BotMetrics {
-    pub fn new() -> Self {
+    pub fn new(intel: Option<Arc<dyn strategy::ports::MarketIntelligencePort>>) -> Self {
         Self {
             // Opportunity tracking
             opportunities_detected: AtomicU64::new(0),
@@ -157,6 +205,7 @@ impl BotMetrics {
             
             // Remote Control
             is_paused: std::sync::atomic::AtomicBool::new(false),
+            intel,
         }
     }
 

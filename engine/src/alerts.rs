@@ -46,6 +46,7 @@ pub struct Field {
 pub struct AlertManager {
     discord_webhook: Option<String>,
     telegram_config: Option<TelegramConfig>,
+    ntfy_topic: Option<String>,
     client: Client,
     last_alerts: Mutex<HashMap<String, Instant>>,
 }
@@ -56,10 +57,11 @@ pub struct TelegramConfig {
 }
 
 impl AlertManager {
-    pub fn new(discord_webhook: Option<String>, telegram_config: Option<TelegramConfig>) -> Self {
+    pub fn new(discord_webhook: Option<String>, telegram_config: Option<TelegramConfig>, ntfy_topic: Option<String>) -> Self {
         Self {
             discord_webhook,
             telegram_config,
+            ntfy_topic,
             client: Client::new(),
             last_alerts: Mutex::new(HashMap::new()),
         }
@@ -157,6 +159,18 @@ impl AlertManager {
                     }
                 }
                 Err(e) => tracing::error!("Failed to send Telegram alert: {}", e),
+            }
+        }
+
+        // ntfy.sh
+        if let Some(topic) = &self.ntfy_topic {
+            let url = format!("https://ntfy.sh/{}", topic);
+            let payload = format!("{}: {}", title, message);
+            
+            if let Err(e) = self.client.post(&url).body(payload).send().await {
+                tracing::error!("Failed to send ntfy alert: {}", e);
+            } else {
+                tracing::info!("✅ ntfy alert dispatched successfully.");
             }
         }
     }
@@ -352,6 +366,27 @@ impl AlertManager {
                 Field { name: "Net PnL".to_string(), value: format!("{:.6} SOL", net_pnl), inline: true },
                 Field { name: "Uptime".to_string(), value: uptime_str, inline: true },
                 Field { name: "Success %".to_string(), value: format!("{:.1}%", success_rate), inline: true },
+            ]
+        ).await;
+    }
+
+    pub async fn send_trade_notification(&self, opportunity: &mev_core::ArbitrageOpportunity, signature: &str) {
+        let profit_sol = opportunity.expected_profit_lamports as f64 / 1e9;
+        let title = "🔥 BUNDLE DISPATCHED";
+        let message = format!(
+            "<b>Profit:</b> <code>{:.6} SOL</code>\n\
+             <b>Signature:</b> <code>{}</code>\n\
+             <b>Hops:</b> {}", 
+            profit_sol, signature, opportunity.steps.len()
+        );
+
+        self.send_alert(
+            AlertSeverity::Success,
+            title,
+            &message,
+            vec![
+                Field { name: "Profit".to_string(), value: format!("{:.6} SOL", profit_sol), inline: true },
+                Field { name: "Steps".to_string(), value: opportunity.steps.len().to_string(), inline: true },
             ]
         ).await;
     }

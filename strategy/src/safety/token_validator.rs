@@ -10,8 +10,8 @@ mod checks;
 pub struct TokenSafetyChecker {
     rpc: RpcClient,
     burn_addresses: Vec<Pubkey>,
-    safe_cache: DashMap<Pubkey, std::time::Instant>,
-    blacklist: DashMap<Pubkey, std::time::Instant>,
+    pub(crate) safe_cache: DashMap<Pubkey, std::time::Instant>,
+    pub(crate) blacklist: DashMap<Pubkey, std::time::Instant>,
     min_liquidity_lamports: u64,
     whitelist: Vec<Pubkey>,  // Known-safe tokens (stablecoins, wrapped SOL)
 }
@@ -35,6 +35,8 @@ impl TokenSafetyChecker {
                 Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(),
                 // Raydium Protocol Token (Known safe)
                 Pubkey::from_str("4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R").unwrap(),
+                // Native SOL System Program (Indicator for SOL)
+                Pubkey::from_str("11111111111111111111111111111111").unwrap(),
             ],
         }
     }
@@ -52,41 +54,65 @@ impl TokenSafetyChecker {
 
         if let Some(timestamp_ref) = self.safe_cache.get(mint) {
             if (*timestamp_ref).elapsed() < std::time::Duration::from_secs(3600) {
+                mev_core::telemetry::SAFETY_CACHE_HITS.inc();
                 return Ok(true);
             }
         }
+        mev_core::telemetry::SAFETY_CACHE_MISSES.inc();
         
-        let is_safe = self.run_deep_validation(mint, pool_id).await?;
+        let validation_result = self.run_deep_validation(mint, pool_id).await;
         
-        if is_safe {
+        if validation_result.is_ok() {
             debug!("✅ Token {} passed safety validation.", mint);
             self.safe_cache.insert(*mint, std::time::Instant::now());
             self.safe_cache.insert(*pool_id, std::time::Instant::now());
+            Ok(true)
         } else {
-            warn!("⛔ Token {} FAILED safety validation. Blacklisting.", mint);
+            let reason = match validation_result {
+                Err(e) => e.to_string(),
+                _ => "Unknown".to_string(),
+            };
+            warn!("⛔ Token {} FAILED safety validation ({}). Blacklisting.", mint, reason);
+            
+            // Increment detailed metrics
+            let metric_reason = if reason.contains("Authority") { "authority" }
+                else if reason.contains("Distribution") { "distribution" }
+                else if reason.contains("Liquidity") { "liquidity" }
+                else if reason.contains("LP") { "lp_status" }
+                else { "other" };
+            
+            mev_core::telemetry::SAFETY_FAILURES.with_label_values(&[metric_reason]).inc();
+            
             self.blacklist.insert(*mint, std::time::Instant::now());
             self.blacklist.insert(*pool_id, std::time::Instant::now());
+            Ok(false)
         }
-
-        Ok(is_safe)
     }
 
-    async fn run_deep_validation(&self, mint: &Pubkey, pool_id: &Pubkey) -> Result<bool> {
-        let (auth_res, dist_res, liq_res) = tokio::join!(
-            checks::check_authorities(&self.rpc, mint),
+    async fn run_deep_validation(&self, mint: &Pubkey, pool_id: &Pubkey) -> Result<()> {
+        // 1. BATCH FETCH: Mint and Pool Account data
+        let keys = vec![*mint, *pool_id];
+        let accounts = self.rpc.get_multiple_accounts(&keys).await?;
+        
+        let mint_acc = accounts[0].as_ref().ok_or_else(|| anyhow::anyhow!("Mint not found"))?;
+        let pool_acc = accounts[1].as_ref().ok_or_else(|| anyhow::anyhow!("Pool not found"))?;
+ 
+        // 2. Parallel Sub-checks using batched data
+        let (auth_res, dist_res, liq_res): (Result<bool>, Result<bool>, Result<bool>) = tokio::join!(
+            async { checks::authorities::check_authorities_from_data(&mint_acc.data, mint) },
             checks::check_holder_distribution(&self.rpc, mint),
-            checks::check_liquidity_depth(&self.rpc, pool_id, self.min_liquidity_lamports)
+            checks::liquidity_depth::check_liquidity_from_data(&self.rpc, &pool_acc.data, pool_id, self.min_liquidity_lamports)
         );
 
-        if !auth_res? || !dist_res? || !liq_res? {
-            return Ok(false);
-        }
+        if !auth_res.unwrap_or(false) { return Err(anyhow::anyhow!("Authority Check Failed")); }
+        if !dist_res.unwrap_or(false) { return Err(anyhow::anyhow!("Distribution Check Failed")); }
+        if !liq_res.unwrap_or(false) { return Err(anyhow::anyhow!("Liquidity Check Failed")); }
 
-        match checks::check_lp_status(&self.rpc, pool_id, &self.burn_addresses).await {
-            Ok(true) => Ok(true),
+        match checks::lp_status::check_lp_status_from_data(&self.rpc, &pool_acc.data, pool_id, &self.burn_addresses).await {
+            Ok(true) => Ok(()),
             Ok(false) => {
-                 // Secondary check: If it's Orca Whirlpool (no LP mint to burn), assume safe if in monitored pools
-                 Ok(true)
+                 // Secondary check: If it's Orca Whirlpool (no LP mint to burn), assume safe
+                 Ok(())
             },
             Err(e) => Err(e),
         }

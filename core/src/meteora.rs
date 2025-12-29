@@ -89,4 +89,5 @@ pub struct MeteoraSwapKeys {
     pub oracle: Pubkey,
     pub user_token_x: Pubkey,
     pub user_token_y: Pubkey,
+    pub user_owner: Pubkey,
 }

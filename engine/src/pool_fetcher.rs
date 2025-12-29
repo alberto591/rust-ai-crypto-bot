@@ -1,7 +1,7 @@
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::error::Error;
-use std::str::FromStr;
+// use std::str::FromStr;
 
 // Internal dependencies
 use mev_core::raydium::{AmmInfo, RaydiumSwapKeys}; 
@@ -23,6 +23,12 @@ impl strategy::ports::PoolKeyProvider for PoolKeyFetcher {
     async fn get_orca_keys(&self, pool_id: &Pubkey) -> Result<mev_core::orca::OrcaSwapKeys, anyhow::Error> {
         let keys = self.fetch_orca_keys(pool_id).await
             .map_err(|e| anyhow::anyhow!("Orca key fetch error: {}", e))?;
+        Ok(keys)
+    }
+
+    async fn get_meteora_keys(&self, pool_id: &Pubkey) -> Result<mev_core::meteora::MeteoraSwapKeys, anyhow::Error> {
+        let keys = self.fetch_meteora_keys(pool_id).await
+            .map_err(|e| anyhow::anyhow!("Meteora key fetch error: {}", e))?;
         Ok(keys)
     }
 }
@@ -131,6 +137,32 @@ impl PoolKeyFetcher {
             tick_array_1,
             tick_array_2,
             oracle,
+        })
+    }
+
+    pub async fn fetch_meteora_keys(&self, pool_id: &Pubkey) -> Result<mev_core::meteora::MeteoraSwapKeys, Box<dyn Error>> {
+        tracing::debug!("🔍 Fetching Meteora keys for Pool: {}", pool_id);
+        let account = self.rpc.get_account(pool_id)?;
+        
+        let dlmm: &mev_core::meteora::MeteoraDLMM = bytemuck::try_from_bytes(&account.data[..1024])
+            .map_err(|_| "Failed to cast Meteora data layout")?;
+
+        // Meteora DLMM usually has reserves derived or stored. 
+        // For instruction building, we need specific vault addresses.
+        // We can derive them if we know they are ATAs of the pool or use fixed offsets.
+        // For now, providing a structured guess based on common DLMM layouts.
+        
+        Ok(mev_core::meteora::MeteoraSwapKeys {
+            dlmm_pool: *pool_id,
+            bin_array_bitmap_extension: None, // Optional
+            reserve_x: Pubkey::default(), // To be resolved if needed
+            reserve_y: Pubkey::default(), 
+            token_x_mint: dlmm.token_x_mint(),
+            token_y_mint: dlmm.token_y_mint(),
+            oracle: Pubkey::default(),
+            user_token_x: Pubkey::default(),
+            user_token_y: Pubkey::default(),
+            user_owner: Pubkey::default(),
         })
     }
 }

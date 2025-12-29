@@ -3,11 +3,21 @@ pub mod orca;
 pub mod meteora;
 pub mod math;
 pub mod pump_fun;
+pub mod telemetry;
+pub mod pool_weight;
 
 use serde::{Serialize, Deserialize};
 use solana_sdk::pubkey::Pubkey;
 
 use smallvec::SmallVec;
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub enum FeeStrategy {
+    #[default]
+    Low,
+    Medium,
+    High,
+    Extreme,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PoolUpdate {
@@ -58,12 +68,17 @@ pub struct ArbitrageOpportunity {
     pub timestamp: u64,
     pub is_dna_match: bool,    // Added for Phase 11 Telemetry
     pub is_elite_match: bool,  // Added for Phase 11 Telemetry
+    
+    // Metadata for Success Library (Phase 6)
+    pub initial_liquidity_lamports: Option<u64>,
+    pub launch_hour_utc: Option<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum DexType {
     Raydium,
     Orca,
+    Meteora,
 }
 
 pub mod constants {
@@ -92,6 +107,7 @@ pub mod constants {
 
     // Discovery Constants
     pub const PUMP_FUN_PROGRAM: Pubkey = pubkey!("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+    pub const METEORA_PROGRAM_ID: Pubkey = pubkey!("LbSndVRSRBrs9P2ra3Sg949UasT5pU832A87W5YyWvM");
     pub const RAYDIUM_AMM_LOG_TRIGGER: &str = "initialize2";
     pub const PUMP_FUN_LOG_TRIGGER: &str = "Create";
 }
@@ -141,4 +157,10 @@ pub struct TokenDNA {
     pub has_twitter: bool,
     pub mint_renounced: bool,
     pub market_volatility: f64,
+}
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DNAMatch {
+    pub is_match: bool,
+    pub is_elite: bool,
+    pub score: u64,
 }

@@ -4,14 +4,12 @@ use futures_util::{StreamExt, SinkExt};
 use tokio::sync::{mpsc, broadcast};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use serde_json::{json, Value};
-// use solana_sdk::pubkey::Pubkey;
-// use anyhow::{Result, anyhow};
-// use crate::config::BotConfig;
 use crate::tui::AppState;
 use mev_core::constants::*;
 use mev_core::MarketUpdate;
 use crate::discovery::{DiscoveryEvent, parse_log_message};
-
+// use mev_core::telemetry::*;
+use crate::scoring::PoolScoringEngine;
 pub async fn start_market_watcher(
     ws_url: String,
     rpc_url: String,
@@ -20,18 +18,29 @@ pub async fn start_market_watcher(
     tui_state: Option<Arc<std::sync::Mutex<AppState>>>,
     monitored_pools: HashMap<String, (String, String)>,
     mut subscription_rx: mpsc::UnboundedReceiver<String>,
+    scoring_engine: Arc<PoolScoringEngine>,
 ) {
     tracing::info!("📡 Starting Unified MarketWatcher: {}", ws_url);
+    let hydration_limit = Arc::new(tokio::sync::Semaphore::new(3)); // Max 3 concurrent GET_TRANSACTION calls
 
     let mut retry_delay = 2; // Start with 2s
     let mut seen_signatures = std::collections::HashSet::new();
+    let mut seen_pools: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
     let mut last_cleanup = std::time::Instant::now();
+    let mut last_decay = std::time::Instant::now();
 
     loop {
-        // Periodic cleanup of seen signatures (every 5 minutes)
+        // Periodic cleanup of seen signatures and pools (every 5 minutes)
         if last_cleanup.elapsed() > std::time::Duration::from_secs(300) {
             seen_signatures.clear();
+            seen_pools.clear();
             last_cleanup = std::time::Instant::now();
+        }
+
+        // Periodic weight decay (every 60 seconds)
+        if last_decay.elapsed() > std::time::Duration::from_secs(60) {
+            scoring_engine.decay_weights();
+            last_decay = std::time::Instant::now();
         }
 
         let (ws_stream, _) = match connect_async(&ws_url).await {
@@ -53,24 +62,24 @@ pub async fn start_market_watcher(
 
         // 1. Initial Subscriptions
         let sub_messages = vec![
-            // Discovery: Raydium
             json!({
                 "jsonrpc": "2.0", "id": 1, "method": "logsSubscribe",
                 "params": [{ "mentions": [RAYDIUM_V4_PROGRAM.to_string()] }, { "commitment": "processed" }]
             }),
-            // Discovery: Pump.fun
             json!({
                 "jsonrpc": "2.0", "id": 2, "method": "logsSubscribe",
                 "params": [{ "mentions": [PUMP_FUN_PROGRAM.to_string()] }, { "commitment": "processed" }]
             }),
-            // Discovery: Orca
             json!({
                 "jsonrpc": "2.0", "id": 3, "method": "logsSubscribe",
                 "params": [{ "mentions": [ORCA_WHIRLPOOL_PROGRAM.to_string()] }, { "commitment": "processed" }]
             }),
-            // Heartbeat: Slots
             json!({
-                "jsonrpc": "2.0", "id": 4, "method": "slotSubscribe"
+                "jsonrpc": "2.0", "id": 4, "method": "logsSubscribe",
+                "params": [{ "mentions": [METEORA_PROGRAM_ID.to_string()] }, { "commitment": "processed" }]
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 5, "method": "slotSubscribe"
             }),
         ];
 
@@ -78,12 +87,10 @@ pub async fn start_market_watcher(
             let _ = write.send(Message::Text(sub.to_string().into())).await;
         }
 
-        // Discovery context for hydration
         let mut sub_to_pool = HashMap::new();
         let mut pending_subs = HashMap::new(); // Request ID -> Pool Addr
         let mut req_id = 100;
 
-        // 2. Pre-subscribe to monitored pools
         for pool_addr in monitored_pools.keys() {
             let mid = req_id; req_id += 1;
             pending_subs.insert(mid, pool_addr.clone());
@@ -96,10 +103,8 @@ pub async fn start_market_watcher(
 
         tracing::info!("👂 Unified Watcher ONLINE. Monitoring {} pools + New Discovery.", monitored_pools.len());
 
-        // 3. Main Loop
         loop {
             tokio::select! {
-                // A. Request for New Dynamic Subscriptions
                 Some(new_pool) = subscription_rx.recv() => {
                     let mid = req_id; req_id += 1;
                     pending_subs.insert(mid, new_pool.clone());
@@ -112,12 +117,10 @@ pub async fn start_market_watcher(
                     }
                 }
 
-                // B. Incoming Messages
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(json) = serde_json::from_str::<Value>(&text) {
-                                // 1. Handle Subscription Responses (ID based)
                                 if let Some(id_val) = json.get("id").and_then(|v| v.as_u64()) {
                                     if let Some(pool_addr) = pending_subs.get(&(id_val as i32)) {
                                         if let Some(sub_id) = json.get("result").and_then(|v| v.as_u64()) {
@@ -128,7 +131,6 @@ pub async fn start_market_watcher(
                                     continue;
                                 }
 
-                                // 2. Handle Notifications (Params based)
                                 if let Some(params) = json.get("params") {
                                     let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
                                     let sub_id = params.get("subscription").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -143,7 +145,23 @@ pub async fn start_market_watcher(
                                                             let log_str = log.as_str().unwrap_or("");
                                                             if let Some(event) = parse_log_message(log_str, signature) {
                                                                 if seen_signatures.insert(signature.to_string()) {
-                                                                    handle_discovery_event(event, signature, &rpc_client, &market_tx, &discovery_tx, &tui_state).await;
+                                                                    let pool_key = event.pool_address.to_string();
+                                                                    let should_process = if let Some(last_seen) = seen_pools.get(&pool_key) {
+                                                                        if last_seen.elapsed() < std::time::Duration::from_secs(300) {
+                                                                            tracing::debug!("⏭️ Skipping duplicate pool: {} (seen {} seconds ago)", pool_key, last_seen.elapsed().as_secs());
+                                                                            mev_core::telemetry::POOL_DEDUP_SKIPS.inc();
+                                                                            false
+                                                                        } else {
+                                                                            true
+                                                                        }
+                                                                    } else {
+                                                                        true
+                                                                    };
+                                                                    
+                                                                    if should_process {
+                                                                        seen_pools.insert(pool_key, std::time::Instant::now());
+                                                                        handle_discovery_event(event, signature, &rpc_client, &market_tx, &discovery_tx, &tui_state, hydration_limit.clone(), Arc::clone(&scoring_engine)).await;
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -157,16 +175,14 @@ pub async fn start_market_watcher(
                                                     if let Some(value) = result.get("value") {
                                                         if let Some(data_arr) = value.get("data").and_then(|d| d.as_array()) {
                                                             if let Some(update_str) = data_arr.first().and_then(|v| v.as_str()) {
-                                                                handle_account_update(pool_addr_str, update_str, &market_tx).await;
+                                                                handle_account_update(pool_addr_str, update_str, &market_tx, Arc::clone(&scoring_engine)).await;
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
                                         },
-                                        "slotNotification" => {
-                                            // Slot processing if needed for heartbeat
-                                        },
+                                        "slotNotification" => {},
                                         _ => {}
                                     }
                                 }
@@ -191,7 +207,9 @@ async fn handle_discovery_event(
     rpc: &Arc<solana_client::nonblocking::rpc_client::RpcClient>,
     market_tx: &broadcast::Sender<MarketUpdate>,
     discovery_tx: &mpsc::Sender<DiscoveryEvent>,
-    tui: &Option<Arc<std::sync::Mutex<AppState>>>
+    tui: &Option<Arc<std::sync::Mutex<AppState>>>,
+    semaphore: Arc<tokio::sync::Semaphore>,
+    scoring_engine: Arc<PoolScoringEngine>,
 ) {
     tracing::info!("✨ [{:?}] New Pool Detected! Sig: {}", event.program_id, signature);
     
@@ -200,40 +218,56 @@ async fn handle_discovery_event(
             state.recent_discoveries.push(event.clone());
         }
     }
-    crate::telemetry::DISCOVERY_TOKENS_TOTAL.inc();
+    mev_core::telemetry::DISCOVERY_TOKENS_TOTAL.inc();
     let _ = discovery_tx.send(event.clone()).await;
 
-    // Trigger Hydration for immediate trading (Snipe logic)
+    // Initialize pool weight in scoring engine
+    scoring_engine.update_activity(event.pool_address);
+
     let rpc_clone = Arc::clone(rpc);
     let market_tx_clone = market_tx.clone();
     let sig = signature.to_string();
     let ev = event.clone();
+    let sem = semaphore.clone();
 
-    tokio::spawn(async move {
-        if ev.program_id == RAYDIUM_V4_PROGRAM {
-            if let Ok(update) = crate::discovery::hydrate_raydium_pool(rpc_clone, sig.clone(), ev).await {
-                tracing::info!("🔥 [Unified] INJECTING Raydium {} for Snipe", update.pool_address);
-                let _ = market_tx_clone.send(update);
+    if let Ok(_permit) = sem.clone().try_acquire_owned() {
+        tokio::spawn(async move {
+            let _permit = _permit;
+            if ev.program_id == RAYDIUM_V4_PROGRAM {
+                if let Ok(update) = crate::discovery::hydrate_raydium_pool(rpc_clone, sig.clone(), ev).await {
+                    tracing::info!("🔥 [Unified] INJECTING Raydium {} for Snipe", update.pool_address);
+                    let _ = market_tx_clone.send(update);
+                }
+            } else if ev.program_id == PUMP_FUN_PROGRAM {
+                if let Ok(update) = crate::discovery::hydrate_pump_fun_pool(rpc_clone, sig.clone(), ev).await {
+                    tracing::info!("🐸 [Unified] INJECTING Pump.fun {} for Snipe", update.pool_address);
+                    let _ = market_tx_clone.send(update);
+                }
+            } else if ev.program_id == METEORA_PROGRAM_ID {
+                if let Ok(update) = crate::discovery::hydrate_meteora_pool(rpc_clone, sig.clone(), ev).await {
+                    tracing::info!("☄️ [Unified] INJECTING Meteora {} for Snipe", update.pool_address);
+                    let _ = market_tx_clone.send(update);
+                }
             }
-        } else if ev.program_id == PUMP_FUN_PROGRAM {
-            if let Ok(update) = crate::discovery::hydrate_pump_fun_pool(rpc_clone, sig.clone(), ev).await {
-                tracing::info!("🐸 [Unified] INJECTING Pump.fun {} for Snipe", update.pool_address);
-                let _ = market_tx_clone.send(update);
-            }
-        }
-    });
+        });
+    } else {
+        tracing::debug!("⏳ Hydration throttled (Signature: {})", signature);
+    }
 }
 
-async fn handle_account_update(pool_addr: &str, data_base64: &str, tx: &broadcast::Sender<MarketUpdate>) {
+async fn handle_account_update(pool_addr: &str, data_base64: &str, tx: &broadcast::Sender<MarketUpdate>, scoring_engine: Arc<PoolScoringEngine>) {
     use base64::{Engine as _, engine::general_purpose};
     use solana_sdk::pubkey::Pubkey;
     use std::str::FromStr;
 
     if let Ok(bytes) = general_purpose::STANDARD.decode(data_base64) {
         let pool_pub = Pubkey::from_str(pool_addr).unwrap_or_default();
+        
+        // Update pool weight (Activity Bonus)
+        scoring_engine.update_activity(pool_pub);
+
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         
-        // Deserialization logic (Shared with listener.rs)
         if bytes.len() == 653 { // Orca
             let whirlpool: &mev_core::orca::Whirlpool = unsafe { &*(bytes.as_ptr() as *const mev_core::orca::Whirlpool) };
             let _ = tx.send(MarketUpdate {

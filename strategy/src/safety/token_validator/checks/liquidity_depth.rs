@@ -6,28 +6,30 @@ use bytemuck;
 use tracing::{warn};
 
 /// Checks if the pool has sufficient liquidity.
-/// Returns true if either vault has at least min_liquidity_lamports.
 pub async fn check_liquidity_depth(rpc: &RpcClient, pool_id: &Pubkey, min_liquidity_lamports: u64) -> Result<bool> {
     let account = rpc.get_account(pool_id).await?;
-    
+    check_liquidity_from_data(rpc, &account.data, pool_id, min_liquidity_lamports).await
+}
+
+pub async fn check_liquidity_from_data(rpc: &RpcClient, data: &[u8], pool_id: &Pubkey, min_liquidity_lamports: u64) -> Result<bool> {
     // For Raydium pools, use the accessor methods from AmmInfo
-    if account.data.len() >= 752 {
-        if let Ok(amm_info) = bytemuck::try_from_bytes::<AmmInfo>(&account.data) {
+    if data.len() >= 752 {
+        if let Ok(amm_info) = bytemuck::try_from_bytes::<AmmInfo>(data) {
             let base_vault = amm_info.base_vault();
             let quote_vault = amm_info.quote_vault();
             
-            if let Ok(base_balance) = rpc.get_balance(&base_vault).await {
-                if base_balance >= min_liquidity_lamports {
-                    return Ok(true);
+            // Batch vault balance check
+            let vaults = vec![base_vault, quote_vault];
+            if let Ok(balances) = rpc.get_multiple_accounts(&vaults).await {
+                for (i, acc_opt) in balances.into_iter().enumerate() {
+                    if let Some(acc) = acc_opt {
+                        if acc.lamports >= min_liquidity_lamports {
+                            return Ok(true);
+                        }
+                        warn!("⚠️ Pool {} vault {} has insufficient balance: {} < {}", 
+                            pool_id, vaults[i], acc.lamports, min_liquidity_lamports);
+                    }
                 }
-                warn!("⚠️ Pool {} base vault {} has insufficient balance: {} < {}", pool_id, base_vault, base_balance, min_liquidity_lamports);
-            }
-            
-            if let Ok(quote_balance) = rpc.get_balance(&quote_vault).await {
-                if quote_balance >= min_liquidity_lamports {
-                    return Ok(true);
-                }
-                warn!("⚠️ Pool {} quote vault {} has insufficient balance: {} < {}", pool_id, quote_vault, quote_balance, min_liquidity_lamports);
             }
             
             warn!("⚠️ Pool {} has insufficient total liquidity depth", pool_id);
@@ -35,6 +37,6 @@ pub async fn check_liquidity_depth(rpc: &RpcClient, pool_id: &Pubkey, min_liquid
         }
     }
     
-    // For other pool types or if parsing fails, assume safe (will be caught by other checks)
+    // For other pool types (like Pump.fun which has virtual reserves already in the update), assume safe here
     Ok(true)
 }
