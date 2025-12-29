@@ -23,6 +23,7 @@ use solana_sdk::pubkey::Pubkey;
 use parking_lot::RwLock;  // Faster than std::sync::Mutex
 use smallvec::SmallVec;   // Stack-allocated vectors
 use crate::analytics::volatility::VolatilityTracker;
+use chrono::Timelike;
 
 use crate::ports::{AIModelPort, ExecutionPort, BundleSimulator, TelemetryPort};
 
@@ -76,6 +77,7 @@ impl StrategyEngine {
         max_slippage_ceiling: u16,
         min_profit_threshold: u64,
         ai_confidence_threshold: f32,
+        sanity_profit_factor: u64,
     ) -> anyhow::Result<Option<ArbitrageOpportunity>> {
         // ... (Safety gates etc) ...
         // ... (Update Graph & Find Cycle) ...
@@ -101,8 +103,9 @@ impl StrategyEngine {
         let profit = opportunity.expected_profit_lamports;
         
         // 2.1 Profit Sanity Check: Reject unrealistic profits
-        // If profit > 10% of input, likely bad data (stale prices, flash crash, or bug)
-        let max_reasonable_profit = initial_amount / 10;  // 10% of input
+        // ALLOW HIGH RETURNS for LiveMicro to test execution paths.
+        // Cap at sanity_profit_factor x input instead of 10%.
+        let max_reasonable_profit = initial_amount.saturating_mul(sanity_profit_factor); 
         if profit > max_reasonable_profit {
             warn!("⛔ SANITY CHECK: Profit {} lamports ({}%) exceeds reasonable threshold {}. Likely stale data or calculation error. Rejecting opportunity.",
                 profit, 
@@ -145,9 +148,26 @@ impl StrategyEngine {
                 1.0 // Heuristic mode: assumes perfect confidence
             }; 
             
-            if ai_confidence < 0.8 {
-                 debug!("⚠️ Opportunity rejected by AI Model (Confidence: {:.2})", ai_confidence);
+            if ai_confidence < ai_confidence_threshold {
+                 debug!("⚠️ Opportunity rejected by AI Model (Confidence: {:.2} < Threshold: {:.2})", ai_confidence, ai_confidence_threshold);
                  return Ok(None);
+            }
+
+            // 2.3 DNA Matching (Success Library)
+            if let Some(intel) = &self.market_intelligence {
+                let dna = mev_core::TokenDNA {
+                    initial_liquidity: (opportunity.min_liquidity as u64), 
+                    initial_market_cap: 0, // Placeholder
+                    launch_hour_utc: chrono::Utc::now().hour() as u8,
+                    has_twitter: false, // Placeholder
+                    mint_renounced: true, // Optimistic placeholder
+                    market_volatility: 0.0, // Placeholder
+                };
+                if !intel.match_dna(&dna).await.unwrap_or(true) {
+                    warn!("⛔ DNA GATE: Token does not match success patterns. Rejecting.");
+                    return Ok(None);
+                }
+                info!("🧬 DNA Match! Opportunity aligns with historical success patterns.");
             }
 
             info!("🚀 AI Approved: High confidence ({:.2}). Triggering execution pipeline...", ai_confidence);

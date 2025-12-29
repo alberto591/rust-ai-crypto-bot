@@ -6,7 +6,7 @@ mod whitelist_tests {
 
     #[tokio::test]
     async fn test_whitelist_bypass_usdc() {
-        let checker = TokenSafetyChecker::new("https://api.mainnet-beta.solana.com");
+        let checker = TokenSafetyChecker::new("https://api.mainnet-beta.solana.com", 10_000_000_000);
         let usdc = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap();
         let pool = Pubkey::new_unique();
         
@@ -17,7 +17,7 @@ mod whitelist_tests {
 
     #[tokio::test]
     async fn test_whitelist_bypass_usdt() {
-        let checker = TokenSafetyChecker::new("https://api.mainnet-beta.solana.com");
+        let checker = TokenSafetyChecker::new("https://api.mainnet-beta.solana.com", 10_000_000_000);
         let usdt = Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB").unwrap();
         let pool = Pubkey::new_unique();
         
@@ -28,7 +28,7 @@ mod whitelist_tests {
 
     #[tokio::test]
     async fn test_whitelist_bypass_wrapped_sol() {
-        let checker = TokenSafetyChecker::new("https://api.mainnet-beta.solana.com");
+        let checker = TokenSafetyChecker::new("https://api.mainnet-beta.solana.com", 10_000_000_000);
         let wsol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
         let pool = Pubkey::new_unique();
         
@@ -39,7 +39,7 @@ mod whitelist_tests {
 
     #[tokio::test]
     async fn test_non_whitelisted_token_runs_checks() {
-        let checker = TokenSafetyChecker::new("https://api.mainnet-beta.solana.com");
+        let checker = TokenSafetyChecker::new("https://api.mainnet-beta.solana.com", 10_000_000_000);
         let random_token = Pubkey::new_unique();
         let pool = Pubkey::new_unique();
 

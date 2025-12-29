@@ -4,8 +4,8 @@ use tokio::sync::mpsc::Sender;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use serde_json::{json, Value};
 use solana_sdk::pubkey::Pubkey;
-use anyhow::{Result, anyhow};
-use crate::config::BotConfig;
+// use anyhow::{Result, anyhow};
+// use crate::config::BotConfig;
 use mev_core::constants::*;
 use crate::tui::AppState;
 
@@ -20,16 +20,19 @@ pub struct DiscoveryEvent {
 
 pub async fn start_discovery(
     ws_url: String, 
+    rpc_url: String, // Explicit RPC URL
     discovery_tx: Sender<DiscoveryEvent>, 
     market_tx: tokio::sync::broadcast::Sender<mev_core::MarketUpdate>,
-    tui_state: Option<Arc<std::sync::Mutex<AppState>>>
+    tui_state: Option<Arc<std::sync::Mutex<AppState>>>,
+    sub_tx: tokio::sync::mpsc::UnboundedSender<String> // NEW CH
 ) {
     tracing::info!("🔍 Starting Discovery Engine on: {}", ws_url);
-
+    
     let (ws_stream, _) = match connect_async(&ws_url).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("❌ Discovery WebSocket Failed: {}", e);
+            tracing::error!("❌ Discovery WebSocket Failed: {}. Retrying with backoff...", e);
+            tokio::time::sleep(tokio::time::Duration::from_secs(15)).await; // Staggered backoff
             return;
         }
     };
@@ -79,7 +82,7 @@ pub async fn start_discovery(
         tracing::error!("❌ Orca Log Sub Failed: {}", e);
     }
 
-    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(ws_url.replace("ws", "http").replace("8546", "8545"))); // Heuristic for RPC URL
+    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(rpc_url)); // Use explicit RPC URL
 
     tracing::info!("👂 Discovery Engine ONLINE. Watching for new pools...");
 
@@ -95,7 +98,7 @@ pub async fn start_discovery(
                                     
                                     for log in logs {
                                         let log_str = log.as_str().unwrap_or("");
-                                        if let Some(mut event) = parse_log_message(log_str, signature) {
+                                        if let Some(event) = parse_log_message(log_str, signature) {
                                             tracing::info!("✨ [{:?}] New Pool Detected! Sig: {}", event.program_id, signature);
                                             
                                             // Handle TUI and Metrics
@@ -111,14 +114,41 @@ pub async fn start_discovery(
                                             if event.program_id == RAYDIUM_V4_PROGRAM {
                                                 let rpc = Arc::clone(&rpc_client);
                                                 let market_tx = market_tx.clone();
+                                                let sub_tx = sub_tx.clone(); // Clone channel
                                                 let sig = signature.to_string();
                                                 
                                                 tokio::spawn(async move {
-                                                    if let Ok(mut update) = hydrate_raydium_pool(rpc, sig, event).await {
+                                                    if let Ok(update) = hydrate_raydium_pool(rpc, sig.clone(), event).await {
                                                         tracing::info!("🔥 Discovery Engine: INJECTING MarketUpdate for new pool {}", update.pool_address);
-                                                        let _ = market_tx.send(update);
+                                                        // 1. Send to Strategy
+                                                        let _ = market_tx.send(update.clone());
+                                                        // 2. Subscribe for updates!
+                                                        let _ = sub_tx.send(update.pool_address.to_string());
+                                                    } else {
+                                                        tracing::warn!("❌ Failed to hydrate Raydium pool. Signature: {}", sig);
                                                     }
                                                 });
+                                            } else if event.program_id == PUMP_FUN_PROGRAM {
+                                                // 🐸 PUMP.FUN INJECTION
+                                                let rpc = Arc::clone(&rpc_client);
+                                                let market_tx = market_tx.clone();
+                                                let sub_tx = sub_tx.clone();
+                                                let sig = signature.to_string();
+                                                tracing::info!("🐸 PUMP.FUN DETECTED: Triggering Hydration for sig {}", sig);
+                                                
+                                                tokio::spawn(async move {
+                                                    if let Ok(update) = hydrate_pump_fun_pool(rpc, sig.clone(), event).await {
+                                                        tracing::info!("🐸 Discovery Engine: INJECTING Pump.fun Pool {} (Market Cap: {:.2} SOL)", 
+                                                            update.pool_address, 
+                                                            update.pc_reserve as f64 / 1e9
+                                                        );
+                                                        let _ = market_tx.send(update.clone());
+                                                        let _ = sub_tx.send(update.pool_address.to_string());
+                                                    } else {
+                                                        tracing::warn!("❌ Failed to hydrate Pump.fun pool. Sig: {}", sig);
+                                                    }
+                                                });
+                                            }
                                             }
                                         }
                                     }
@@ -126,18 +156,17 @@ pub async fn start_discovery(
                             }
                         }
                     }
-                }
             }
             Ok(Message::Close(_)) | Err(_) => {
-                tracing::warn!("🔍 Discovery WebSocket DISRUPTED.");
-                break;
+                 tracing::warn!("🔍 Discovery WebSocket DISRUPTED.");
+                 break;
             }
             _ => {}
         }
     }
 }
 
-async fn hydrate_raydium_pool(
+pub async fn hydrate_raydium_pool(
     rpc: Arc<solana_client::nonblocking::rpc_client::RpcClient>,
     signature: String,
     event: DiscoveryEvent
@@ -190,6 +219,116 @@ async fn hydrate_raydium_pool(
         liquidity: None,
         timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64,
     })
+}
+
+pub async fn hydrate_pump_fun_pool(
+    rpc: Arc<solana_client::nonblocking::rpc_client::RpcClient>,
+    _signature: String,
+    event: DiscoveryEvent
+) -> anyhow::Result<mev_core::MarketUpdate> {
+// use solana_sdk::program_pack::Pack;
+    use borsh::BorshDeserialize;
+    use mev_core::pump_fun::PumpFunBondingCurve;
+    use solana_sdk::signature::Signature;
+    use std::str::FromStr;
+
+    let sig = Signature::from_str(&_signature).map_err(|e| {
+        tracing::error!("❌ Signature Parse Error: {:?} for '{}'", e, _signature);
+        anyhow::anyhow!("Invalid signature: {}", e)
+    })?;
+
+    tracing::info!("🌊 [Unified] Hydrating Pump.fun Sig: {} (Commitment: Confirmed)", _signature);
+
+    // 1. Fetch Transaction to get accounts
+    let mut tx_info = None;
+    for attempt in 1..=3 {
+        match rpc.get_transaction_with_config(
+            &sig,
+            solana_client::rpc_config::RpcTransactionConfig {
+                encoding: Some(solana_transaction_status::UiTransactionEncoding::Base64),
+                commitment: Some(solana_sdk::commitment_config::CommitmentConfig::confirmed()),
+                max_supported_transaction_version: Some(0),
+            }
+        ).await {
+            Ok(info) => {
+                tx_info = Some(info);
+                break;
+            }
+            Err(e) => {
+                tracing::warn!("⏳ [Hydration] Tx Fetch Attempt {} Failed for {}: {}", attempt, _signature, e);
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500 * attempt)).await;
+    }
+    
+    let tx_info = tx_info.ok_or_else(|| anyhow::anyhow!("Failed to fetch Pump.fun transaction {} after 3 attempts", _signature))?;
+    let meta = tx_info.transaction.meta.as_ref().ok_or_else(|| anyhow::anyhow!("No transaction metadata"))?;
+    let message = tx_info.transaction.transaction.decode().ok_or_else(|| anyhow::anyhow!("Failed to decode transaction"))?.message;
+
+    let accounts = message.static_account_keys();
+    if accounts.is_empty() {
+        return Err(anyhow::anyhow!("Transaction has no accounts"));
+    }
+
+    // Pump.fun Create Transaction Account Layout (typical):
+    // [0] Mint, [1] Mint Authority, [2] Bonding Curve, [3] Associated Bonding Curve, [4] Global, [5] User, ...
+    
+    // Batch fetch all accounts from the transaction to be efficient
+    let mut account_results = Vec::new();
+    for chunk in accounts.chunks(100) {
+        let mut retry_count = 0;
+        let chunk_accounts = loop {
+            match rpc.get_multiple_accounts(chunk).await {
+                Ok(accs) => break accs,
+                Err(e) if retry_count < 3 => {
+                    retry_count += 1;
+                    tracing::warn!("⏳ RPC 429 or Error in Hydration (chunk): {}. Retrying {}/3...", e, retry_count);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500 * retry_count)).await;
+                }
+                Err(e) => return Err(anyhow::anyhow!("Failed to fetch accounts in hydration: {}", e)),
+            }
+        };
+        account_results.extend(chunk_accounts);
+    }
+
+    for (i, account_opt) in account_results.into_iter().enumerate() {
+        let key = &accounts[i];
+        if let Some(account) = account_opt {
+            if account.owner == PUMP_FUN_PROGRAM && account.data.len() == 137 {
+                tracing::info!("🎯 Found Pump.fun Bonding Curve at index {}: {}", i, key);
+                
+                if account.data.len() < 8 { continue; }
+                let data_without_discriminator = &account.data[8..];
+
+                match PumpFunBondingCurve::try_from_slice(data_without_discriminator) {
+                    Ok(curve) => {
+                        if curve.virtual_token_reserves > 0 {
+                            tracing::info!("✅ [Unified] Hydrated Pump.fun Curve: Tokens={}, SOL={}", 
+                                curve.virtual_token_reserves, curve.virtual_sol_reserves);
+                            
+                            // In Pump.fun Create, Account 0 is always the Mint
+                            let token_mint = accounts[0];
+                            
+                            return Ok(mev_core::MarketUpdate {
+                                pool_address: *key,
+                                program_id: PUMP_FUN_PROGRAM,
+                                pc_mint: SOL_MINT, 
+                                coin_mint: token_mint,
+                                coin_reserve: curve.virtual_token_reserves,
+                                pc_reserve: curve.virtual_sol_reserves,
+                                price_sqrt: None,
+                                liquidity: None,
+                                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64,
+                            });
+                        }
+                    },
+                    Err(e) => tracing::warn!("❌ Failed to deserialize curve at {}: {}", key, e),
+                }
+            }
+        }
+    }
+    
+    Err(anyhow::anyhow!("Could not identify active Pump.fun bonding curve for {}", _signature))
 }
 
 pub fn parse_log_message(log: &str, _signature: &str) -> Option<DiscoveryEvent> {

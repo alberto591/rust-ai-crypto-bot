@@ -197,7 +197,7 @@ impl strategy::ports::MarketIntelligencePort for DatabaseIntelligence {
             _ => false,
         };
 
-        let matches_liquidity = dna.initial_liquidity >= 10_000_000_000; // 10 SOL minimum
+        let matches_liquidity = dna.initial_liquidity >= 1_000_000_000; // 1 SOL minimum
 
         if analysis.total_successful_launches > 500 {
             // If we have a large library, apply stricter DNA gating

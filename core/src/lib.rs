@@ -2,6 +2,7 @@ pub mod raydium;
 pub mod orca;
 pub mod meteora;
 pub mod math;
+pub mod pump_fun;
 
 use serde::{Serialize, Deserialize};
 use solana_sdk::pubkey::Pubkey;

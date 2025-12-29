@@ -7,7 +7,7 @@ use solana_sdk::{
 };
 use spl_associated_token_account::instruction::create_associated_token_account;
 use spl_associated_token_account::get_associated_token_address;
-use solana_client::rpc_client::RpcClient;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use anyhow::Result;
 
 pub struct WalletManager {
@@ -23,10 +23,10 @@ impl WalletManager {
 
     /// Ensure an ATA exists for the given mint. 
     /// Returns Some(Instruction) if creation is needed, None otherwise.
-    pub fn ensure_ata_exists(&self, payer: &Pubkey, token_mint: &Pubkey) -> Option<Instruction> {
+    pub async fn ensure_ata_exists(&self, payer: &Pubkey, token_mint: &Pubkey) -> Option<Instruction> {
         let ata = get_associated_token_address(payer, token_mint);
         
-        match self.rpc.get_account(&ata) {
+        match self.rpc.get_account(&ata).await {
             Ok(_) => None, // Account exists
             Err(_) => {
                 println!("📦 Creating ATA for mint: {}", token_mint);
@@ -41,14 +41,14 @@ impl WalletManager {
     }
 
     /// Prepares WSOL by wrapping native SOL if balance is low.
-    pub fn sync_wsol(&self, payer: &Keypair, amount_lamports: u64) -> Result<Vec<Instruction>> {
+    pub async fn sync_wsol(&self, payer: &Keypair, amount_lamports: u64) -> Result<Vec<Instruction>> {
         let wsol_mint = spl_token::native_mint::id();
         let ata = get_associated_token_address(&payer.pubkey(), &wsol_mint);
         
         let mut instructions = Vec::new();
 
         // 1. Ensure ATA exists
-        if let Some(ix) = self.ensure_ata_exists(&payer.pubkey(), &wsol_mint) {
+        if let Some(ix) = self.ensure_ata_exists(&payer.pubkey(), &wsol_mint).await {
             instructions.push(ix);
         }
 
@@ -84,20 +84,64 @@ impl WalletManager {
         )?)
     }
 
+    /// Batch get token balances using get_multiple_accounts
+    pub async fn get_multiple_token_balances(&self, owner: &Pubkey, mints: &[Pubkey]) -> Result<HashMap<Pubkey, u64>> {
+        use spl_associated_token_account::get_associated_token_address;
+        use solana_sdk::program_pack::Pack;
+        use std::collections::HashMap;
+
+        let atas: Vec<Pubkey> = mints.iter().map(|m| get_associated_token_address(owner, m)).collect();
+        let mut results = HashMap::new();
+
+        // RPC get_multiple_accounts limit is typically 100
+        for chunk in atas.chunks(100) {
+            let accounts = self.rpc.get_multiple_accounts(chunk).await?;
+            for (i, account_opt) in accounts.into_iter().enumerate() {
+                let mint = mints[results.len()];
+                let balance = if let Some(account) = account_opt {
+                    if let Ok(token_account) = spl_token::state::Account::unpack(&account.data) {
+                        token_account.amount
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                results.insert(mint, balance);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Check which ATAs exist for a list of mints
+    pub async fn check_atas_exist(&self, owner: &Pubkey, mints: &[Pubkey]) -> Result<Vec<(Pubkey, bool)>> {
+        let atas: Vec<Pubkey> = mints.iter().map(|m| get_associated_token_address(owner, m)).collect();
+        let accounts = self.rpc.get_multiple_accounts(&atas).await?;
+        
+        let mut results = Vec::new();
+        for (i, acc) in accounts.into_iter().enumerate() {
+            results.push((mints[i], acc.is_some()));
+        }
+        Ok(results)
+    }
+
     /// Get native SOL balance
-    pub fn get_sol_balance(&self, address: &Pubkey) -> Result<u64> {
-        Ok(self.rpc.get_balance(address)?)
+    pub async fn get_sol_balance(&self, address: &Pubkey) -> Result<u64> {
+        Ok(self.rpc.get_balance(address).await?)
     }
 
     /// Get token balance for a given mint
-    pub fn get_token_balance(&self, owner: &Pubkey, mint: &Pubkey) -> Result<u64> {
+    pub async fn get_token_balance(&self, owner: &Pubkey, mint: &Pubkey) -> Result<u64> {
         let ata = get_associated_token_address(owner, mint);
-        match self.rpc.get_token_account_balance(&ata) {
+        match self.rpc.get_token_account_balance(&ata).await {
             Ok(balance) => Ok(balance.amount.parse::<u64>().unwrap_or(0)),
             Err(_) => Ok(0), // Account likely doesn't exist
         }
     }
 }
+
+use std::collections::HashMap;
 
 #[cfg(test)]
 mod tests {

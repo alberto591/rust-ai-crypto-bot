@@ -94,11 +94,17 @@ pub struct BotConfig {
     pub kelly_fraction: f32,
     #[serde(alias = "DATABASE_URL")]
     pub database_url: Option<String>,
+    #[serde(alias = "MIN_LIQUIDITY_LAMPORTS", default = "default_min_liquidity")]
+    pub min_liquidity_lamports: u64,
+    #[serde(alias = "SANITY_PROFIT_FACTOR", default = "default_sanity_profit_factor")]
+    pub sanity_profit_factor: u64,
 }
 
-fn default_min_profit() -> u64 { 20_000 }
+fn default_min_profit() -> u64 { 1 }
 fn default_ai_confidence() -> f32 { 0.8 }
 fn default_kelly_fraction() -> f32 { 0.1 }
+fn default_min_liquidity() -> u64 { 10_000_000_000 } // 10 SOL
+fn default_sanity_profit_factor() -> u64 { 100 } // 100x
 
 fn default_tip_percentage() -> f64 { 0.2 }
 fn default_max_tip() -> u64 { 100_000_000 } // 0.1 SOL

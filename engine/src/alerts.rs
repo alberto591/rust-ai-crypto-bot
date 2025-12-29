@@ -215,7 +215,7 @@ impl AlertManager {
                                                     self.send_alert(AlertSeverity::Success, "Remote Control", "▶️ Trading RESUMED via Telegram.", vec![]).await;
                                                 }
                                                 "/balance" => {
-                                                    if let Ok(bal) = wallet_mgr.get_sol_balance(&payer_pubkey) {
+                                                    if let Ok(bal) = wallet_mgr.get_sol_balance(&payer_pubkey).await {
                                                         let sol = bal as f64 / 1e9;
                                                         self.send_alert(AlertSeverity::Info, "Balance Request", &format!("Current Wallet Balance: {:.6} SOL", sol), vec![]).await;
                                                     }
@@ -259,7 +259,7 @@ impl AlertManager {
         let loss = metrics.total_loss_lamports.load(Ordering::Relaxed);
         let net_pnl = (profit as i64 - loss as i64) as f64 / 1e9;
         let gas = metrics.total_gas_spent.load(Ordering::Relaxed) as f64 / 1e9;
-        let current_sol = wallet_mgr.get_sol_balance(payer_pubkey).unwrap_or(0) as f64 / 1e9;
+        let current_sol = wallet_mgr.get_sol_balance(payer_pubkey).await.unwrap_or(0) as f64 / 1e9;
         
         let success_rate = if exec_attempts > 0 {
             (total_executions as f64 / exec_attempts as f64) * 100.0
@@ -390,7 +390,7 @@ pub async fn monitor_health(
         last_processed_count = detected;
 
         // 2. SOL Balance Check
-        if let Ok(balance) = wallet_mgr.get_sol_balance(&payer_pubkey) {
+        if let Ok(balance) = wallet_mgr.get_sol_balance(&payer_pubkey).await {
             let sol = balance as f64 / 1e9;
             if sol < 0.1 { // 0.1 SOL threshold
                 alerts.send_alert(

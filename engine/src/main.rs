@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use dotenvy::dotenv;
 use solana_sdk::signature::{read_keypair_file, Signer};
+use solana_sdk::pubkey::Pubkey;
 use tracing::{info, error, warn};
+// use futures_util::future;
 
 // Internal Crates
 use strategy::StrategyEngine;
@@ -25,6 +27,7 @@ mod alerts;
 mod intelligence;
 mod discovery;
 mod birth_watcher;
+mod watcher;
 
 use crate::intelligence::MarketIntelligence;
 use crate::wallet_manager::WalletManager;
@@ -43,7 +46,7 @@ pub struct AppContext {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     dotenv().ok();
     let bot_start_time = tokio::time::Instant::now();
     
@@ -91,30 +94,39 @@ async fn main() {
     info!("✅ Config Loaded & Validated: RPC={}, Jito={}", bot_cfg.rpc_url, bot_cfg.jito_url);
     
     let key_path = if bot_cfg.keypair_path.is_empty() {
-        format!("{}/.config/solana/id.json", env::var("HOME").unwrap())
+        format!("{}/.config/solana/id.json", env::var("HOME").unwrap_or_else(|_| ".".to_string()))
     } else {
         bot_cfg.keypair_path.clone()
     };
     
-    let payer = read_keypair_file(&key_path).expect("Failed to read keypair");
+    let payer = match read_keypair_file(&key_path) {
+        Ok(k) => k,
+        Err(e) => {
+            error!("❌ CRITICAL: Failed to read keypair at {}: {}", key_path, e);
+            std::process::exit(1);
+        }
+    };
     info!("🔑 Identity: {}", payer.pubkey());
 
     // 4.2 Initialize Shared Infrastructure (Base Layer)
+    info!("🔌 Connecting to RPC: {}...", bot_cfg.rpc_url);
     let pool_fetcher = Arc::new(pool_fetcher::PoolKeyFetcher::new(&bot_cfg.rpc_url));
     let metrics = Arc::new(metrics::BotMetrics::new());
     let risk_mgr = Arc::new(risk::RiskManager::new());
 
     // 4.3 Initialize Performance & Safety
+    info!("📊 Initializing Performance Tracker...");
     let performance_tracker = Arc::new(strategy::analytics::performance::PerformanceTracker::new("logs/performance.log").await);
-    let safety_checker = Arc::new(strategy::safety::token_validator::TokenSafetyChecker::new(&bot_cfg.rpc_url));
+    info!("🛡️ Initializing Safety Checker...");
+    let safety_checker = Arc::new(strategy::safety::token_validator::TokenSafetyChecker::new(&bot_cfg.rpc_url, bot_cfg.min_liquidity_lamports));
 
     // 4.4 Initialize Execution Engine (Abstracted)
-    // Dynamic Executor Selection: Jito for Mainnet, Legacy for Devnet/Local
+    info!("⚡ Initializing Execution Port (Jito preference)...");
     let execution_port: Arc<dyn strategy::ports::ExecutionPort> = if bot_cfg.jito_url.is_empty() {
         info!("⚠️ Jito URL empty. Falling back to Legacy RPC Executor.");
         Arc::new(executor::legacy::LegacyExecutor::new(
             &bot_cfg.rpc_url,
-            solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).expect("Failed to clone keypair"),
+            solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).map_err(|e| anyhow::anyhow!("Keypair clone failed: {}", e))?,
             Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
         ))
     } else {
@@ -130,7 +142,7 @@ async fn main() {
                 warn!("❌ Jito initialization failed: {}. Falling back to Legacy.", e);
                 Arc::new(executor::legacy::LegacyExecutor::new(
                     &bot_cfg.rpc_url,
-                    solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).expect("Failed to clone keypair"),
+                    solana_sdk::signature::Keypair::from_bytes(&payer.to_bytes()).map_err(|e| anyhow::anyhow!("Keypair clone failed: {}", e))?,
                     Some(Arc::clone(&pool_fetcher) as Arc<dyn strategy::ports::PoolKeyProvider>),
                 ))
             }
@@ -248,44 +260,57 @@ async fn main() {
     });
 
     // 4.5 Pre-flight Wallet Verification
+    info!("🧪 Cooling down for RPC stability (3s)...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    
     info!("🧪 Validating Wallet state for monitored tokens...");
     let mut unique_mints = std::collections::HashSet::new();
     for pool in config::MONITORED_POOLS {
         unique_mints.insert(pool.token_a);
         unique_mints.insert(pool.token_b);
     }
-
-    for mint in &unique_mints {
-        // Skip Native SOL as it doesn't need an ATA
-        if *mint == mev_core::constants::SOL_MINT {
-            continue;
-        }
-
-        if let Some(_ix) = context.wallet_mgr.ensure_ata_exists(&context.payer.pubkey(), &mint) {
-            info!("📦 Auto-creating ATA for token: {}...", mint);
-        }
+    
+    let unique_mints_vec: Vec<Pubkey> = unique_mints.into_iter().collect();
+    
+    match context.wallet_mgr.check_atas_exist(&context.payer.pubkey(), &unique_mints_vec).await {
+        Ok(results) => {
+            let mut missing_atas = Vec::new();
+            for (mint, exists) in results {
+                if !exists {
+                    missing_atas.push(mint);
+                }
+            }
+            if !missing_atas.is_empty() {
+                info!("📦 Found {} missing ATAs. Preparing for lazy creation...", missing_atas.len());
+            } else {
+                info!("✅ All required ATAs exist.");
+            }
+        },
+        Err(e) => warn!("⚠️ Failed to batch check ATAs: {}. Proceeding anyway.", e),
     }
 
     // 4.6 Pre-flight Balance Checks (Gas & Capital)
     info!("💰 Checking balances...");
-    match context.wallet_mgr.get_sol_balance(&context.payer.pubkey()) {
+    match context.wallet_mgr.get_sol_balance(&context.payer.pubkey()).await {
         Ok(balance) => {
             let sol = balance as f64 / 1e9;
-            if balance < 50_000_000 { // 0.05 SOL
+            if balance < 100_000_000 { // 0.1 SOL
                 warn!("⚠️ LOW SOL BALANCE: {:.4} SOL. Gas might run out during high activity.", sol);
             } else {
                 info!("✅ SOL Balance: {:.4} SOL (Gas Safe)", sol);
             }
         }
-        Err(e) => error!("❌ Failed to fetch SOL balance: {}", e),
+        Err(e) => error!("❌ Failed to fetch real SOL balance: {}", e),
     }
 
     info!("📊 --- STARTUP TOKEN INVENTORY ---");
-    let mut inventory = std::collections::HashMap::new();
-    unique_mints.remove(&mev_core::constants::SOL_MINT); // Already checked SOL
-    for mint in unique_mints {
-        match context.wallet_mgr.get_token_balance(&context.payer.pubkey(), &mint) {
-            Ok(balance) => {
+    let mut inventory_mints = unique_mints_vec.clone();
+    inventory_mints.retain(|m| *m != mev_core::constants::SOL_MINT);
+
+    match context.wallet_mgr.get_multiple_token_balances(&context.payer.pubkey(), &inventory_mints).await {
+        Ok(balances) => {
+            let mut inventory = std::collections::HashMap::new();
+            for (mint, balance) in balances {
                 let symbol = match mint {
                     mev_core::constants::USDC_MINT => "USDC",
                     mev_core::constants::JUP_MINT => "JUP ",
@@ -294,13 +319,13 @@ async fn main() {
                     mev_core::constants::WIF_MINT => "WIF ",
                     _ => "UNKN",
                 };
-                info!("   ├─ {}: {:.6} (raw: {})", symbol, balance as f64 / 1e6, balance); // Assuming 6 decimals for most (USDC/JUP etc)
+                info!("   ├─ {}: {:.6} (raw: {})", symbol, balance as f64 / 1e6, balance);
                 inventory.insert(symbol, balance);
             }
-            Err(e) => error!("   ├─ Error fetching balance for {}: {}", mint, e),
-        }
+            info!("   └─ Total: {} tokens tracked", inventory.len());
+        },
+        Err(e) => error!("❌ Failed to batch fetch token balances: {}", e),
     }
-    info!("   └─ Total: {} tokens tracked", inventory.len());
     info!("📊 -------------------------------");
     
     let (tx, _rx) = tokio::sync::broadcast::channel::<mev_core::MarketUpdate>(1024);
@@ -338,44 +363,37 @@ async fn main() {
         }
     }
 
-    let ws_url = bot_cfg.ws_url.clone();
-    let listener_tx = tx.clone();
-    let listener_pools = pools_to_watch.clone();
-    let _listener_handle = tokio::spawn(async move {
-        loop {
-            listener::start_listener(ws_url.clone(), listener_tx.clone(), listener_pools.clone()).await;
-            warn!("🔗 WebSocket Listener exited. Reconnecting in 5s...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        }
-    });
-
-    // 6. Shutdown Watcher (Best Practice: Coordinated Exit)
-    let shutdown_tx_signal = shutdown_tx.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
-        info!("🛑 Shutdown signal received (Ctrl+C). Cleaning up...");
-        let _ = shutdown_tx_signal.send(()).await;
-    });
+    // 5.5 Network Ingestion (Unified MarketWatcher)
+    let (sub_tx, sub_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (discovery_tx, discovery_rx) = mpsc::channel(128);
     
-    // 6.2 Success Library Infrastructure
     let args: Vec<String> = env::args().collect();
     let discovery_enabled = args.contains(&"--discovery".to_string()) 
         || env::var("DISCOVERY_ENABLED").is_ok()
         || bot_cfg.mode != config::ExecutionMode::Simulation;
     let analyze_mode = args.contains(&"--analyze".to_string());
-    
-    // 6.3 Discovery Engine (Live Ingestion)
-    if discovery_enabled {
-        info!("🔍 Discovery Engine Requested. Starting live pool monitoring...");
-        let (discovery_tx, discovery_rx) = mpsc::channel(128);
-        
-        let discovery_ws = bot_cfg.ws_url.clone(); // Restored
-        let tui_clone = Arc::clone(&tui_state);
-        let market_tx_clone = tx.clone();
-        tokio::spawn(async move {
-            discovery::start_discovery(discovery_ws, discovery_tx, market_tx_clone, Some(tui_clone)).await;
-        });
 
+    let ws_url = bot_cfg.ws_url.clone();
+    let rpc_url = bot_cfg.rpc_url.clone();
+    let market_tx_watcher = tx.clone();
+    let discovery_tx_watcher = discovery_tx.clone();
+    let tui_watcher = Arc::clone(&tui_state);
+    let monitored_pools = pools_to_watch.clone();
+
+    tokio::spawn(async move {
+        watcher::start_market_watcher(
+            ws_url,
+            rpc_url,
+            discovery_tx_watcher,
+            market_tx_watcher,
+            Some(tui_watcher),
+            monitored_pools,
+            sub_rx
+        ).await;
+    });
+
+    // 6. Birth Watcher (New Pool Logic)
+    if discovery_enabled {
         let birth_watcher = Arc::new(birth_watcher::BirthWatcher::new(
             Arc::new(bot_cfg.clone()),
             Arc::clone(&intelligence_mgr),
@@ -385,9 +403,16 @@ async fn main() {
         tokio::spawn(async move {
             birth_watcher.run(discovery_rx).await;
         });
-        
-        info!("✅ Success Library Ingestion ACTIVE.");
+        info!("✅ Discovery & Birth Monitoring ACTIVE.");
     }
+
+    // 6.1 Shutdown Watcher
+    let shutdown_tx_signal = shutdown_tx.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+        info!("🛑 Shutdown signal received (Ctrl+C). Cleaning up...");
+        let _ = shutdown_tx_signal.send(()).await;
+    });
 
     // 6.4 Analysis Mode (Success DNA Extraction)
     if analyze_mode {
@@ -450,7 +475,7 @@ async fn main() {
                     reserve_b: event.pc_reserve as u128,
                     price_sqrt: event.price_sqrt,
                     liquidity: event.liquidity,
-                    fee_bps: 30, 
+                    fee_bps: 25, // Raydium V4 standard fee (0.25%) 
                     timestamp: event.timestamp as u64,
                 });
                 
@@ -473,6 +498,7 @@ async fn main() {
                 }
 
                 let start_time = std::time::Instant::now();
+                println!("⏱️ START process_event at {:?}", start_time);
                 let processing_result = ctx.engine.process_event(
                     domain_update, 
                     ctx.config.default_trade_size_lamports,
@@ -483,10 +509,12 @@ async fn main() {
                     ctx.config.volatility_sensitivity,
                     ctx.config.max_slippage_ceiling,
                     ctx.config.min_profit_threshold_lamports,
-                    ctx.config.ai_confidence_threshold
+                    ctx.config.ai_confidence_threshold,
+                    ctx.config.sanity_profit_factor
                 ).await;
                 
                 let duration = start_time.elapsed().as_millis() as f64;
+                println!("⏱️ END process_event. Duration: {}ms", duration);
                 telemetry::DETECTION_LATENCY.observe(duration);
 
                 match processing_result {
@@ -542,4 +570,6 @@ async fn main() {
             info!("Goodbye!");
         }
     }
+    
+    Ok(())
 }

@@ -1,6 +1,6 @@
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use std::error::Error;
+use anyhow::Result;
 use std::str::FromStr;
 use dashmap::DashMap;
 use tracing::{debug, warn};
@@ -17,7 +17,7 @@ pub struct TokenSafetyChecker {
 }
 
 impl TokenSafetyChecker {
-    pub fn new(rpc_url: &str) -> Self {
+    pub fn new(rpc_url: &str, min_liquidity_lamports: u64) -> Self {
         Self {
             rpc: RpcClient::new(rpc_url.to_string()),
             burn_addresses: vec![
@@ -25,7 +25,7 @@ impl TokenSafetyChecker {
             ],
             safe_cache: DashMap::new(),
             blacklist: DashMap::new(),
-            min_liquidity_lamports: 10_000_000_000, // 10 SOL minimum
+            min_liquidity_lamports,
             whitelist: vec![
                 // USDC (Circle) - has freeze authority for regulatory compliance
                 Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap(),
@@ -33,11 +33,13 @@ impl TokenSafetyChecker {
                 Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB").unwrap(),
                 // Wrapped SOL
                 Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(),
+                // Raydium Protocol Token (Known safe)
+                Pubkey::from_str("4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R").unwrap(),
             ],
         }
     }
 
-    pub async fn is_safe_to_trade(&self, mint: &Pubkey, pool_id: &Pubkey) -> Result<bool, Box<dyn Error>> {
+    pub async fn is_safe_to_trade(&self, mint: &Pubkey, pool_id: &Pubkey) -> Result<bool> {
         // SHORT-CIRCUIT: Whitelist check first (known-safe stablecoins)
         if self.whitelist.contains(mint) {
             debug!("✅ Token {} is whitelisted. Skipping safety checks.", mint);
@@ -53,9 +55,9 @@ impl TokenSafetyChecker {
                 return Ok(true);
             }
         }
-
-        let is_safe = self.run_deep_validation(mint, pool_id).await;
-
+        
+        let is_safe = self.run_deep_validation(mint, pool_id).await?;
+        
         if is_safe {
             debug!("✅ Token {} passed safety validation.", mint);
             self.safe_cache.insert(*mint, std::time::Instant::now());
@@ -69,18 +71,24 @@ impl TokenSafetyChecker {
         Ok(is_safe)
     }
 
-    async fn run_deep_validation(&self, mint: &Pubkey, pool_id: &Pubkey) -> bool {
-        if let Ok(false) = checks::check_authorities(&self.rpc, mint).await { return false; }
-        if let Ok(false) = checks::check_holder_distribution(&self.rpc, mint).await { return false; }
-        if let Ok(false) = checks::check_liquidity_depth(&self.rpc, pool_id, self.min_liquidity_lamports).await { return false; }
+    async fn run_deep_validation(&self, mint: &Pubkey, pool_id: &Pubkey) -> Result<bool> {
+        let (auth_res, dist_res, liq_res) = tokio::join!(
+            checks::check_authorities(&self.rpc, mint),
+            checks::check_holder_distribution(&self.rpc, mint),
+            checks::check_liquidity_depth(&self.rpc, pool_id, self.min_liquidity_lamports)
+        );
+
+        if !auth_res? || !dist_res? || !liq_res? {
+            return Ok(false);
+        }
 
         match checks::check_lp_status(&self.rpc, pool_id, &self.burn_addresses).await {
-            Ok(true) => true,
+            Ok(true) => Ok(true),
             Ok(false) => {
-                // Secondary check: If it's Orca Whirlpool (no LP mint to burn), assume safe if in monitored pools
-                true
+                 // Secondary check: If it's Orca Whirlpool (no LP mint to burn), assume safe if in monitored pools
+                 Ok(true)
             },
-            Err(_) => false,
+            Err(e) => Err(e),
         }
     }
 
@@ -108,10 +116,10 @@ mod tests {
 
     #[test]
     fn test_token_safety_checker_initialization() {
-        let checker = TokenSafetyChecker::new("http://localhost:8899");
+        let checker = TokenSafetyChecker::new("http://localhost:8899", 5_000_000_000);
         
         // Verify initialization values
-        assert_eq!(checker.get_min_liquidity(), 10_000_000_000);
+        assert_eq!(checker.get_min_liquidity(), 5_000_000_000);
         assert_eq!(checker.burn_addresses.len(), 1);
         
         // Verify caches are empty
@@ -122,9 +130,9 @@ mod tests {
 
     #[test]
     fn test_blacklist_prevents_trading() {
-        let checker = TokenSafetyChecker::new("http://localhost:8899");
+        let checker = TokenSafetyChecker::new("http://localhost:8899", 10_000_000_000);
         let mint = Pubkey::new_unique();
-        let pool = Pubkey::new_unique();
+        let _pool = Pubkey::new_unique();
         
         // Add to blacklist
         checker.blacklist.insert(mint, std::time::Instant::now());
@@ -136,7 +144,7 @@ mod tests {
 
     #[test]
     fn test_safe_cache_storage() {
-        let checker = TokenSafetyChecker::new("http://localhost:8899");
+        let checker = TokenSafetyChecker::new("http://localhost:8899", 10_000_000_000);
         let mint = Pubkey::new_unique();
         
         // Add to safe cache
@@ -149,7 +157,7 @@ mod tests {
 
     #[test]
     fn test_cache_expiration_logic() {
-        let checker = TokenSafetyChecker::new("http://localhost:8899");
+        let checker = TokenSafetyChecker::new("http://localhost:8899", 10_000_000_000);
         let mint = Pubkey::new_unique();
         
         // Add to cache with old timestamp (simulating expiration)
@@ -165,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_burn_address_configuration() {
-        let checker = TokenSafetyChecker::new("http://localhost:8899");
+        let checker = TokenSafetyChecker::new("http://localhost:8899", 10_000_000_000);
         
         // Verify burn address is valid
         assert_eq!(checker.burn_addresses.len(), 1);
@@ -175,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_multiple_tokens_independent_cache() {
-        let checker = TokenSafetyChecker::new("http://localhost:8899");
+        let checker = TokenSafetyChecker::new("http://localhost:8899", 10_000_000_000);
         let mint1 = Pubkey::new_unique();
         let mint2 = Pubkey::new_unique();
         
@@ -193,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_cache_and_blacklist_mutual_exclusivity() {
-        let checker = TokenSafetyChecker::new("http://localhost:8899");
+        let checker = TokenSafetyChecker::new("http://localhost:8899", 10_000_000_000);
         let mint = Pubkey::new_unique();
         
         // Add to cache first
@@ -210,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_min_liquidity_threshold() {
-        let checker = TokenSafetyChecker::new("http://localhost:8899");
+        let checker = TokenSafetyChecker::new("http://localhost:8899", 10_000_000_000);
         
         // Verify minimum liquidity is 10 SOL
         assert_eq!(checker.get_min_liquidity(), 10_000_000_000);
